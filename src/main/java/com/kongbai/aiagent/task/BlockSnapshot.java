@@ -161,9 +161,11 @@ public final class BlockSnapshot {
         if (block.isEmpty()) {
             return null;
         }
+        int[] rel = parseInts(JsonUtil.stringOr(obj, "", "rel"));
+        int[] abs = parseInts(JsonUtil.stringOr(obj, "", "abs"));
         return new BlockSnapshot(
-                parseInts(JsonUtil.stringOr(obj, "", "rel")),
-                parseInts(JsonUtil.stringOr(obj, "", "abs")),
+                rel[0], rel[1], rel[2],
+                abs[0], abs[1], abs[2],
                 block,
                 JsonUtil.stringOr(obj, "", "state"),
                 readInt(obj, "signal"));

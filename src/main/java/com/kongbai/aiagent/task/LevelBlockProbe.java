@@ -4,14 +4,12 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.block.state.properties.Property;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 
 /**
  * {@link BlockProbe} 的 Minecraft 实现：读真实世界的方块状态。
@@ -153,37 +151,46 @@ public final class LevelBlockProbe implements BlockProbe {
      *
      * <p>只保留红石相关属性，格式 {@code name=value,name=value}（已排序，保证稳定）。
      * 其余属性（朝向、含水等）一律丢弃，避免无关变化干扰判断。
+     *
+     * <p><b>为什么解析 toString 而不是调 getValues()</b>：
+     * {@code BlockState.getValues()} 的返回类型在 26.1 从
+     * {@code Map<Property<?>, Comparable<?>>} 变成了 {@code Stream<Value<?>>}，
+     * 直接调用在 26.2 上编译不过。而 {@code toString()} 的输出格式
+     * （{@code Block{minecraft:stone_button}[powered=true,facing=north]}）
+     * 长期稳定，且完全不依赖具体 API 形态 ——
+     * 这样同一个实现能同时兼容新旧版本，不会被下一次 API 变动打挂。
+     *
+     * <p>代价是依赖字符串格式。若 Mojang 哪天改了 toString 格式，
+     * 最坏结果是提取不到属性（返回空串），此时 {@link #isRedstoneRelated}
+     * 会退化成只看方块 ID 关键词 —— 功能变弱但不会出错。
      */
     @NotNull
     private static String extractStateKey(@NotNull BlockState state) {
-        Map<Property<?>, Comparable<?>> values;
+        String text;
         try {
-            values = state.getValues();
+            text = state.toString();
         } catch (Throwable t) {
             return "";
         }
-        List<String> parts = new ArrayList<>();
-        for (Map.Entry<Property<?>, Comparable<?>> entry : values.entrySet()) {
-            Property<?> property = entry.getKey();
-            if (property == null) {
-                continue;
-            }
-            String name;
-            try {
-                name = property.getName();
-            } catch (Throwable t) {
-                continue;
-            }
-            if (name == null || !isRedstonePropertyName(name)) {
-                continue;
-            }
-            Comparable<?> value = entry.getValue();
-            parts.add(name + "=" + (value == null ? "null" : value.toString()));
+        if (text == null || text.isEmpty()) {
+            return "";
         }
-        // 排序，保证同样的状态每次生成的字符串一致
+        List<String> parts = new ArrayList<>();
+        java.util.regex.Matcher matcher = PROPERTY_PATTERN.matcher(text.toLowerCase(Locale.ROOT));
+        while (matcher.find()) {
+            String name = matcher.group(1);
+            if (isRedstonePropertyName(name)) {
+                parts.add(name + "=" + matcher.group(2));
+            }
+        }
+        // 排序，保证同样的状态每次生成一致的字符串（Set/Map 遍历顺序不稳定）
         parts.sort(String::compareTo);
         return String.join(",", parts);
     }
+
+    /** 匹配 {@code key=value} 形式的属性。值限定为小写字母/数字/下划线。 */
+    private static final java.util.regex.Pattern PROPERTY_PATTERN =
+            java.util.regex.Pattern.compile("([a-z_]+)=([a-z0-9_]+)");
 
     /** 状态属性名是否与红石/开关相关。 */
     private static boolean isRedstonePropertyName(@NotNull String name) {
