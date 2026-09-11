@@ -1,5 +1,6 @@
 plugins {
-    id 'fabric-loom' version "${loom_version}"
+    // 26.1 起 Minecraft 不再混淆，Loom 的插件 id 随之改为 net.fabricmc.fabric-loom
+    id 'net.fabricmc.fabric-loom' version "${loom_version}"
     id 'maven-publish'
 }
 
@@ -20,16 +21,22 @@ loom {
     // 本项目无客户端专属代码，不做环境拆分。
     // 一旦启用 splitEnvironmentSourceSets，就必须存在 src/client 目录，
     // 否则 Loom 会在配置阶段报错。
+    //
+    // 26.1 起没有 intermediary 中间命名空间，源码 jar 无法（也无需）重映射。
+    noIntermediateMappings()
 }
 
 dependencies {
     minecraft "com.mojang:minecraft:${minecraft_version}"
-    mappings loom.officialMojangMappings()
-    modImplementation "net.fabricmc:fabric-loader:${loader_version}"
-    modImplementation "net.fabricmc.fabric-api:fabric-api:${fabric_api_version}"
+    // 26.1 起 MC 未混淆：不再声明 mappings。
+    // 保留官方命名（如 net.minecraft.commands.CommandSourceStack），与运行时一致。
+
+    // 26.1 起不再使用 modImplementation / modCompileOnly，改用标准配置
+    implementation "net.fabricmc:fabric-loader:${loader_version}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${fabric_api_version}"
 
     // Carpet 核心：编译期依赖，运行时由玩家自行安装
-    modCompileOnly "carpet:fabric-carpet:${minecraft_version}-${carpet_core_version}"
+    compileOnly "carpet:fabric-carpet:${minecraft_version}-${carpet_core_version}"
 
     // GSON 与 java.net.http.HttpClient 均由 Minecraft / JDK 自带，无需额外引入
 }
@@ -52,7 +59,7 @@ java {
     // MC 26.1+ 要求 Java 25
     sourceCompatibility = JavaVersion.VERSION_25
     targetCompatibility = JavaVersion.VERSION_25
-    withSourcesJar()
+    // 不生成 sourcesJar：26.1 起无 intermediary 命名空间，remapSourcesJar 无法工作
 }
 
 jar {
