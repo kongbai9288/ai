@@ -1,0 +1,10 @@
+{
+  "required": true,
+  "package": "com.kongbai.aiagent.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "minVersion": "0.8",
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "mixins": []
+}

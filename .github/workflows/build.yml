@@ -1,0 +1,55 @@
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+          cache: gradle
+
+      # 本项目未内置 gradle-wrapper.jar，直接安装指定版本 Gradle。
+      # 版本与 Fabric 26.2 公告一致（Loom 1.17 + Gradle 9.5.1）。
+      - name: Install Gradle 9.5.1
+        run: |
+          wget -q https://services.gradle.org/distributions/gradle-9.5.1-bin.zip
+          unzip -q gradle-9.5.1-bin.zip
+          echo "$GITHUB_WORKSPACE/gradle-9.5.1/bin" >> "$GITHUB_PATH"
+
+      - name: Verify toolchain
+        run: |
+          java -version
+          gradle --version | head -5
+
+      - name: Build with Gradle
+        run: gradle build --no-daemon --stacktrace
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-agent-${{ github.sha }}
+          path: build/libs/*.jar
+          if-no-files-found: error
+
+      - name: Upload on failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: build/reports/
+          if-no-files-found: ignore

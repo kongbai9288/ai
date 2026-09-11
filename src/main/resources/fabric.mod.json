@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "ai-agent",
+  "version": "${version}",
+  "name": "假人智能 AI Agent",
+  "description": "Carpet 附属：让 AI 通过 Carpet 命令驱动假人执行任务。任务录制/回放、智能体决策、权限隔离。",
+  "authors": [
+    "kongbai9288"
+  ],
+  "contact": {
+    "homepage": "https://github.com/kongbai9288/ai",
+    "sources": "https://github.com/kongbai9288/ai"
+  },
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.kongbai.aiagent.AiAgentMod"
+    ]
+  },
+  "mixins": [
+    "ai-agent.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "minecraft": "26.2",
+    "java": ">=25",
+    "carpet": "*"
+  },
+  "suggests": {
+    "fabric-api": "*"
+  }
+}
