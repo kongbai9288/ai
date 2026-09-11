@@ -425,3 +425,87 @@ mixn 在 `performCommand` 的 `HEAD` 注入，此时命令尚未执行，
    相对坐标保留但暂未启用（未来若要做「同一任务在不同位置执行」会用到）。
 4. **部分一致仍需人工判断** —— 只要有一处不一致就整体跳过，
    可能因无关方块变动导致该执行的没执行。此时提示会给出 `force` 用法。
+
+---
+
+# 十一、全维度检测 + 假人命名规范
+
+## 11.1 全维度状态检测（去掉"只测主世界"限制）
+
+### 改动
+
+| 位置 | 改动 |
+|---|---|
+| `BlockSnapshot` | 新增 `dimension` 字段；序列化时**仅非主世界才写**，保持存档精简 |
+| `BlockProbe` | `collect` / `recollect` 都带维度参数；新增 `isDimensionLoaded` |
+| `LevelBlockProbe` | 持有 `MinecraftServer`（不再是单个 level），按维度 ID 解析世界 |
+| `TaskRecorder` | `sample()` 带维度参数 + `setDimension()`；快照记录所属维度 |
+| `AiAgentMod` | `createProbe` 直接传 server，不再固定 overworld |
+
+### 为什么用遍历而不是 `server.getLevel(key)`
+
+构造 `ResourceKey` 需要 `Registries.DIMENSION` 与 `ResourceLocation`，
+这两个类在 26.x 的包名/方法名仍有变数，直接调用有编译风险。
+
+改为遍历 `server.getAllLevels()`，比对 `level.dimension().identifier().toString()`，
+只依赖 `MinecraftServer` 与 `ServerLevel` 两个稳定 API。
+维度数量通常只有个位数，遍历开销可忽略。
+
+### 内存安全
+
+探测器持有 `MinecraftServer`，但**每次读取都现取 level，绝不缓存 ServerLevel**。
+世界会因切换/卸载变化，缓存会读到已卸载的世界并阻止其回收。
+
+### 维度未加载的单独提示
+
+维度不存在导致的跳过，和"机器状态已变"导致的跳过，对玩家意义完全不同。
+现在会分别提示：
+
+```
+§6[状态检测] 跳过：维度 the_nether 当前未加载，无法核对现场
+§8  加载该维度后重试，或用 /carpet ai run <名> force 强制执行
+```
+
+## 11.2 假人专属前缀与复用
+
+### 问题
+
+Carpet 假人是**服务器级共享资源**。若直接用玩家给的名字（如 `bot1`），
+可能撞上他人已有的假人 —— 轻则把人家的假人传送走，重则替他执行破坏性操作。
+
+另外每个假人都会在存档 `players/` 目录生成一份数据（背包、位置、状态）。
+每次任务新建假人会让存档随任务次数无限膨胀。
+
+### 方案：FakePlayerNaming
+
+**前缀 `ai_`** —— 所有假人名自动加前缀，一眼可辨，且可用
+`/player ai_* kill` 批量清理。
+
+**normalize 幂等** —— `bot1` 与 `ai_bot1` 得到同一个名字 `ai_bot1`。
+这是复用的前提：同一输入永远得到同一名字，才能命中已召唤的假人。
+
+**清洗与截断** —— 只保留字母数字下划线；首字母必须是字母；
+总长 ≤ 16（MC 玩家名上限）。
+
+**复用机制** —— Carpet 的 `/player X spawn` 在 X 已存在时**直接复用**，
+不重置数据、不新建存档条目。因此无条件 spawn 就能实现复用，
+无需额外维护"已召唤列表"（那还会与真实状态不同步）。
+
+### 新增命令
+
+```
+/carpet ai bot info                查看命名规则
+/carpet ai bot list                说明
+/carpet ai bot spawn <名>          召唤（已存在则复用）
+/carpet ai bot stop <名>           停止当前动作
+/carpet ai bot kill <名>           移除（会清背包数据）
+```
+
+## 11.3 残留风险
+
+1. **跨维度录制时假人需手动传送** —— 假人不会自动跨维度。
+   若任务跨维度，需要在任务里显式包含传送步骤，否则假人留在原维度。
+2. **维度 ID 依赖数据包** —— 自定义维度的 ID 由数据包决定，
+   若数据包被移除，该维度的快照会判定为"维度未加载"而跳过（安全方向）。
+3. **假人前缀可能与他人冲突** —— 若服务器上已有别人用 `ai_` 开头的假人，
+   仍可能撞名。可通过修改 `FakePlayerNaming.PREFIX` 常量解决。
