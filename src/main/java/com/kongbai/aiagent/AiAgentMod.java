@@ -263,22 +263,24 @@ public class AiAgentMod implements ModInitializer {
         /**
          * 构造方块状态采集器。
          *
-         * <p><b>每刻新建，用完即弃</b>：{@code LevelBlockProbe} 持有 {@code ServerLevel}，
-         * 若缓存下来会导致世界卸载后无法回收。每刻新建的开销只是一个对象分配，
-         * 相比内存泄漏的风险完全可以接受。
+         * <p><b>每刻新建，用完即弃</b>：探测器持有 {@code MinecraftServer}，
+         * 虽然它在服务器生命周期内稳定，但内部的 {@code ServerLevel}
+         * 会随世界切换/卸载变化 —— 因此探测器<b>每次读取都现取 level</b>，绝不缓存。
+         * 每刻新建的开销只是一个对象分配，相比内存泄漏的风险完全可以接受。
          *
-         * <p><b>已知限制</b>：目前固定取主世界。若机器建在下界/末地，
-         * 检测会读到错误的维度从而判定为「不一致」而跳过。
-         * 由于跳过是安全方向（不会反向操作），这个限制可接受；
-         * 后续可在录制时记录维度 ID 来支持多维度。
+         * <p><b>多维度</b>：不再固定主世界。探测器按快照里记录的维度 ID
+         * 逐个解析对应的 {@code ServerLevel}，因此跨维度机器
+         * （主世界按钮 → 下界农场）也能正确检测。
          *
-         * @return 采集器；无法确定世界时返回 {@code null}（调用方会跳过检测）
+         * @return 采集器；服务器未就绪时返回 {@code null}（调用方会跳过检测）
          */
         @Nullable
         private BlockProbe createProbe(@NotNull MinecraftServer server) {
+            if (server == null) {
+                return null;
+            }
             try {
-                ServerLevel level = server.overworld();
-                return level == null ? null : new LevelBlockProbe(level);
+                return new LevelBlockProbe(server);
             } catch (Throwable t) {
                 return null;
             }

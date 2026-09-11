@@ -1,5 +1,6 @@
 package com.kongbai.aiagent.task;
 
+import com.kongbai.aiagent.machine.FakePlayerNaming;
 import com.kongbai.aiagent.util.PermissionGuard;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -102,13 +103,18 @@ public final class TaskRunner {
         return id;
     }
 
+    /**
+     * 规范化假人名：加专属前缀 + 清洗非法字符。
+     *
+     * <p>走 {@link FakePlayerNaming#normalize}，确保：
+     * <ul>
+     *   <li>一定带 {@code ai_} 前缀，不会操作服务器里别人的假人</li>
+     *   <li>幂等 —— 同一输入永远得到同一名字，从而命中已召唤的假人实现复用</li>
+     * </ul>
+     */
     @Nullable
-    private static String normalizeFakeName(@Nullable String name) {
-        if (name == null) {
-            return null;
-        }
-        String trimmed = name.trim();
-        return trimmed.isEmpty() ? null : trimmed;
+    public static String normalizeFakeName(@Nullable String name) {
+        return FakePlayerNaming.normalize(name);
     }
 
     // ---------- 每刻驱动 ----------
@@ -324,10 +330,22 @@ public final class TaskRunner {
             java.util.List<BlockSnapshot> templates = action.snapshots();
             java.util.List<BlockSnapshot> current;
             try {
-                // 用绝对坐标定位：机器在世界里的位置是固定的，不随执行者移动
-                current = probe.recollect(templates, 0, 0, 0, false);
+                // 用绝对坐标定位：机器在世界里的位置是固定的，不随执行者移动。
+                // 维度按每条快照自己记录的来，因此跨维度机器也能读对。
+                current = probe.recollect(templates, false);
             } catch (RuntimeException e) {
                 return true; // 读取异常不阻断，按原行为执行
+            }
+
+            // 维度未加载：这与"机器状态变了"是两回事，要分开提示
+            for (BlockSnapshot template : templates) {
+                if (template != null && !probe.isDimensionLoaded(template.dimension())) {
+                    messages.add("§6[状态检测] 跳过：维度 " + template.shortDimension()
+                            + " 当前未加载，无法核对现场");
+                    messages.add("§8  加载该维度后重试，或用 §f/carpet ai run "
+                            + task.name() + " force §8强制执行");
+                    return false;
+                }
             }
 
             int total = templates.size();

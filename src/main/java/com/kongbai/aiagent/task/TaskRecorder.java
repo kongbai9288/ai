@@ -83,8 +83,21 @@ public final class TaskRecorder {
      * @param pitch 垂直视角
      */
     public void sample(long tick, double x, double y, double z, float yaw, float pitch) {
+        sample(tick, x, y, z, yaw, pitch, null);
+    }
+
+    /**
+     * 采样玩家状态。
+     *
+     * @param dimension 当前维度 ID；为 {@code null} 时沿用上一次的维度记录
+     */
+    public void sample(long tick, double x, double y, double z, float yaw, float pitch,
+                       @Nullable String dimension) {
         if (finished) {
             return;
+        }
+        if (dimension != null && !dimension.isEmpty()) {
+            lastDimension = dimension;
         }
         if (!isFinite(x) || !isFinite(y) || !isFinite(z) || !isFinite(yaw) || !isFinite(pitch)) {
             // 坐标异常（例如玩家在未加载区块/切维度瞬间）时跳过本次采样，
@@ -124,6 +137,18 @@ public final class TaskRecorder {
     }
 
     /**
+     * 设置当前维度。
+     *
+     * <p>由录制驱动在采样/录制命令前调用。
+     * 快照需要知道自己属于哪个维度，回放时才能到正确的世界去读。
+     */
+    public void setDimension(@Nullable String dimension) {
+        if (dimension != null && !dimension.isEmpty()) {
+            lastDimension = dimension;
+        }
+    }
+
+    /**
      * 记录一条玩家执行的命令，并采集执行前的方块状态快照。
      *
      * <p><b>会过滤掉本模组的录制命令</b>（见 {@link #shouldIgnoreCommand}），
@@ -158,7 +183,7 @@ public final class TaskRecorder {
         List<BlockSnapshot> snapshots = List.of();
         if (probe != null && probe.isAvailable() && hasSample) {
             try {
-                snapshots = probe.collect(lastX, lastY, lastZ, PROBE_RADIUS);
+                snapshots = probe.collect(lastX, lastY, lastZ, PROBE_RADIUS, lastDimension);
             } catch (RuntimeException e) {
                 snapshots = List.of(); // 采集失败不阻断录制
             }

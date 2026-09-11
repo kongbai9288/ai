@@ -75,8 +75,10 @@ public class CommandsMixin {
             BlockProbe probe = null;
             try {
                 var level = source.getPlayer().level();
-                if (level instanceof ServerLevel serverLevel) {
-                    probe = new LevelBlockProbe(serverLevel);
+                if (level instanceof ServerLevel serverLevel && server != null) {
+                    probe = new LevelBlockProbe(server);
+                    // 同时把当前维度告诉录制器，快照才知道该记哪个世界
+                    recorder.setDimension(LevelBlockProbe.dimensionIdOf(serverLevel));
                 }
             } catch (Throwable ignored) {
                 probe = null; // 拿不到就降级：不采集快照，命令照常记录

@@ -31,6 +31,9 @@ import java.util.Objects;
  */
 public final class BlockSnapshot {
 
+    /** 维度缺失时的兜底值（主世界）。 */
+    public static final String DEFAULT_DIMENSION = "minecraft:overworld";
+
     /** 相对执行者的偏移。 */
     private final int relX;
     private final int relY;
@@ -50,9 +53,19 @@ public final class BlockSnapshot {
     private final String stateKey;
     /** 该位置的红石信号强度（0-15）。 */
     private final int signal;
+    /**
+     * 所属维度 ID，如 {@code minecraft:overworld}。
+     *
+     * <p><b>为什么必须存</b>：机器可能跨维度（主世界按钮控制下界农场）。
+     * 只存坐标不存维度，回放时会到主世界去找下界的方块，
+     * 读到的全是空气 → 判定为「不一致」→ 该执行的被跳过。
+     */
+    @NotNull
+    private final String dimension;
 
     private BlockSnapshot(int relX, int relY, int relZ, int absX, int absY, int absZ,
-                          @NotNull String blockId, @NotNull String stateKey, int signal) {
+                          @NotNull String blockId, @NotNull String stateKey, int signal,
+                          @NotNull String dimension) {
         this.relX = relX;
         this.relY = relY;
         this.relZ = relZ;
@@ -62,15 +75,18 @@ public final class BlockSnapshot {
         this.blockId = blockId;
         this.stateKey = stateKey;
         this.signal = Math.max(0, Math.min(15, signal));
+        this.dimension = dimension == null || dimension.isEmpty()
+                ? DEFAULT_DIMENSION : dimension;
     }
 
     @NotNull
     public static BlockSnapshot of(int relX, int relY, int relZ, int absX, int absY, int absZ,
-                                   @Nullable String blockId, @Nullable String stateKey, int signal) {
+                                   @Nullable String blockId, @Nullable String stateKey,
+                                   int signal, @Nullable String dimension) {
         return new BlockSnapshot(relX, relY, relZ, absX, absY, absZ,
                 blockId == null ? "" : blockId,
                 stateKey == null ? "" : stateKey,
-                signal);
+                signal, dimension);
     }
 
     // ---------- 访问器 ----------
@@ -113,6 +129,12 @@ public final class BlockSnapshot {
         return signal;
     }
 
+    /** 维度 ID，永不为 {@code null}（缺失时返回 {@link #DEFAULT_DIMENSION}）。 */
+    @NotNull
+    public String dimension() {
+        return dimension;
+    }
+
     /**
      * 与另一个快照比较是否"状态一致"。
      *
@@ -133,9 +155,9 @@ public final class BlockSnapshot {
 
     @NotNull
     public String describe() {
-        return String.format("%s @(%d,%d,%d) %s sig=%d",
+        return String.format("%s @(%d,%d,%d) %s sig=%d [%s]",
                 blockId.isEmpty() ? "?" : blockId, absX, absY, absZ,
-                stateKey.isEmpty() ? "-" : stateKey, signal);
+                stateKey.isEmpty() ? "-" : stateKey, signal, shortDimension());
     }
 
     // ---------- 序列化 ----------
@@ -148,6 +170,10 @@ public final class BlockSnapshot {
         obj.addProperty("block", blockId);
         obj.addProperty("state", stateKey);
         obj.addProperty("signal", signal);
+        // 只在非主世界时写维度，保持存档精简（绝大多数机器在主世界）
+        if (!DEFAULT_DIMENSION.equals(dimension)) {
+            obj.addProperty("dim", dimension);
+        }
         return obj;
     }
 
@@ -168,7 +194,8 @@ public final class BlockSnapshot {
                 abs[0], abs[1], abs[2],
                 block,
                 JsonUtil.stringOr(obj, "", "state"),
-                readInt(obj, "signal"));
+                readInt(obj, "signal"),
+                JsonUtil.stringOr(obj, DEFAULT_DIMENSION, "dim"));
     }
 
     /** 解析 "x,y,z" 形式，返回长度 3 的数组；失败返回全 0。 */
@@ -243,18 +270,28 @@ public final class BlockSnapshot {
         return relX == other.relX && relY == other.relY && relZ == other.relZ
                 && absX == other.absX && absY == other.absY && absZ == other.absZ
                 && signal == other.signal
+                && dimension.equals(other.dimension)
                 && blockId.equals(other.blockId)
                 && stateKey.equals(other.stateKey);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(relX, relY, relZ, absX, absY, absZ, blockId, stateKey, signal);
+        return Objects.hash(relX, relY, relZ, absX, absY, absZ, blockId, stateKey, signal, dimension);
     }
 
     @Override
     public String toString() {
         return "BlockSnapshot{" + describe() + "}";
+    }
+
+    /**
+     * 维度短名（去掉 {@code minecraft:} 前缀），仅用于展示。
+     */
+    @NotNull
+    public String shortDimension() {
+        int idx = dimension.indexOf(':');
+        return idx >= 0 && idx + 1 < dimension.length() ? dimension.substring(idx + 1) : dimension;
     }
 
     /** 空列表常量，避免重复分配。 */

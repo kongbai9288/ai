@@ -2,46 +2,112 @@ package com.kongbai.aiagent.task;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.state.BlockState;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
- * {@link BlockProbe} 的 Minecraft 实现：读真实世界的方块状态。
+ * {@link BlockProbe} 的 Minecraft 实现：读真实世界的方块状态，<b>支持多维度</b>。
  *
  * <p><b>只采集红石相关方块</b>：全量采集（半径 3 就有 343 个方块）
  * 会混入大量无关噪音（比如旁边的台阶朝向、草的生长阶段），
  * 反而让对比失去意义。这里用「方块 ID 关键词 + 状态属性关键词」双重过滤，
  * 只留下真正能反映机器状态的方块。
  *
- * <p><b>不持有世界引用</b>：{@code level} 是构造参数，
- * 由调用方在 tick 内传入；本类不缓存、不静态持有。
- * 调用方用完即弃，避免世界卸载后无法回收。
+ * <p><b>不长期持有世界引用</b>：持有 {@link MinecraftServer}，
+ * 但调用方只在 tick 内创建本对象，用完即弃。
+ * {@code MinecraftServer} 本身在服务器生命周期内是稳定存在的，
+ * 而 {@code ServerLevel} 会随世界切换/卸载变化 ——
+ * 所以<b>每次读取都现取 level</b>，绝不缓存，避免卸载后无法回收。
  *
- * <p><b>异常隔离</b>：任何读取失败（区块未加载、坐标越界）都跳过该点，不抛异常。
+ * <p><b>异常隔离</b>：任何读取失败（区块未加载、坐标越界、维度不存在）
+ * 都跳过该点，不抛异常。
  */
 public final class LevelBlockProbe implements BlockProbe {
 
-    private final ServerLevel level;
+    private final MinecraftServer server;
 
-    public LevelBlockProbe(@NotNull ServerLevel level) {
-        this.level = level;
+    public LevelBlockProbe(@NotNull MinecraftServer server) {
+        this.server = server;
     }
 
     @Override
     public boolean isAvailable() {
-        return level != null;
+        return server != null;
+    }
+
+    @Override
+    public boolean isDimensionLoaded(@NotNull String dimension) {
+        return resolveLevel(dimension) != null;
+    }
+
+    /**
+     * 按维度 ID 取对应的 {@code ServerLevel}。
+     *
+     * <p><b>为什么用遍历而不是 {@code server.getLevel(key)}</b>：
+     * 构造 {@code ResourceKey} 需要 {@code Registries.DIMENSION} 与
+     * {@code ResourceLocation}，这两个类在 26.x 的包名/方法名仍有变数。
+     * 遍历 {@code getAllLevels()} 只依赖 {@code MinecraftServer} 与
+     * {@code ServerLevel} 两个稳定 API，编译风险低得多。
+     * 维度数量通常只有个位数，遍历开销可忽略。
+     *
+     * <p><b>每次调用都重新取</b>，不缓存。维度可能因数据包变化、
+     * 世界重载等原因失效，缓存会读到已卸载的世界。
+     *
+     * @return 维度不存在或未加载时返回 {@code null}
+     */
+    @Nullable
+    private ServerLevel resolveLevel(@NotNull String dimension) {
+        if (server == null || dimension == null || dimension.isEmpty()) {
+            return null;
+        }
+        try {
+            for (ServerLevel level : server.getAllLevels()) {
+                if (level == null) {
+                    continue;
+                }
+                // dimension().identifier().toString() 形如 minecraft:the_nether
+                String id = level.dimension().identifier().toString();
+                if (dimension.equals(id)) {
+                    return level;
+                }
+            }
+            return null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * 取当前维度的 ID 字符串。
+     *
+     * <p>供录制时记录「这条命令是在哪个维度执行的」。
+     */
+    @NotNull
+    public static String dimensionIdOf(@NotNull ServerLevel level) {
+        try {
+            return level.dimension().identifier().toString();
+        } catch (Throwable t) {
+            return BlockSnapshot.DEFAULT_DIMENSION;
+        }
     }
 
     @Override
     @NotNull
-    public List<BlockSnapshot> collect(double originX, double originY, double originZ, int radius) {
+    public List<BlockSnapshot> collect(double originX, double originY, double originZ,
+                                      int radius, @NotNull String dimension) {
         List<BlockSnapshot> out = new ArrayList<>();
+        ServerLevel level = resolveLevel(dimension);
         if (level == null) {
             return out;
         }
@@ -59,7 +125,7 @@ public final class LevelBlockProbe implements BlockProbe {
                     int x = baseX + dx;
                     int y = baseY + dy;
                     int z = baseZ + dz;
-                    BlockSnapshot snapshot = read(x, y, z, dx, dy, dz);
+                    BlockSnapshot snapshot = read(level, x, y, z, dx, dy, dz, dimension);
                     if (snapshot != null) {
                         out.add(snapshot);
                     }
@@ -72,33 +138,39 @@ public final class LevelBlockProbe implements BlockProbe {
     @Override
     @NotNull
     public List<BlockSnapshot> recollect(@NotNull List<BlockSnapshot> templates,
-                                         double originX, double originY, double originZ,
                                          boolean useRelative) {
         List<BlockSnapshot> out = new ArrayList<>(templates.size());
-        if (level == null || templates.isEmpty()) {
+        if (server == null || templates.isEmpty()) {
             return out;
         }
-        int baseX = (int) Math.floor(originX);
-        int baseY = (int) Math.floor(originY);
-        int baseZ = (int) Math.floor(originZ);
+        // 按维度分组取 level，避免同一批快照里每个都解析一次维度
+        Map<String, ServerLevel> levelCache = new HashMap<>();
 
         for (BlockSnapshot template : templates) {
             if (template == null) {
                 out.add(null);
                 continue;
             }
+            String dim = template.dimension();
+            ServerLevel level = levelCache.computeIfAbsent(dim, this::resolveLevel);
+            if (level == null) {
+                // 维度不存在：读不到就放 null，调用方视为「不一致」并给出准确提示
+                out.add(null);
+                continue;
+            }
             int x, y, z;
             if (useRelative) {
-                x = baseX + template.relX();
-                y = baseY + template.relY();
-                z = baseZ + template.relZ();
+                // 相对模式需要原点；当前调用方一律用绝对坐标，
+                // 这里保留分支以便将来支持「在不同位置重放同一任务」
+                x = template.absX() + template.relX();
+                y = template.absY() + template.relY();
+                z = template.absZ() + template.relZ();
             } else {
                 x = template.absX();
                 y = template.absY();
                 z = template.absZ();
             }
-            // 读失败时放 null，调用方视为「不一致」
-            out.add(read(x, y, z, x - baseX, y - baseY, z - baseZ));
+            out.add(read(level, x, y, z, x, y, z, dim));
         }
         return out;
     }
@@ -109,7 +181,8 @@ public final class LevelBlockProbe implements BlockProbe {
      * @return 非红石相关或读取失败时返回 {@code null}
      */
     @Nullable
-    private BlockSnapshot read(int x, int y, int z, int relX, int relY, int relZ) {
+    private BlockSnapshot read(@NotNull ServerLevel level, int x, int y, int z,
+                               int relX, int relY, int relZ, @NotNull String dimension) {
         try {
             // 世界高度越界直接跳过，避免无谓的区块加载
             if (y < level.getMinY() || y >= level.getMaxY()) {
@@ -140,7 +213,7 @@ public final class LevelBlockProbe implements BlockProbe {
             } catch (Throwable ignored) {
                 signal = 0;
             }
-            return BlockSnapshot.of(relX, relY, relZ, x, y, z, blockId, stateKey, signal);
+            return BlockSnapshot.of(relX, relY, relZ, x, y, z, blockId, stateKey, signal, dimension);
         } catch (Throwable t) {
             return null;
         }
@@ -176,21 +249,20 @@ public final class LevelBlockProbe implements BlockProbe {
             return "";
         }
         List<String> parts = new ArrayList<>();
-        java.util.regex.Matcher matcher = PROPERTY_PATTERN.matcher(text.toLowerCase(Locale.ROOT));
+        Matcher matcher = PROPERTY_PATTERN.matcher(text.toLowerCase(Locale.ROOT));
         while (matcher.find()) {
             String name = matcher.group(1);
             if (isRedstonePropertyName(name)) {
                 parts.add(name + "=" + matcher.group(2));
             }
         }
-        // 排序，保证同样的状态每次生成一致的字符串（Set/Map 遍历顺序不稳定）
+        // 排序，保证同样的状态每次生成一致的字符串（遍历顺序不稳定会影响对比）
         parts.sort(String::compareTo);
         return String.join(",", parts);
     }
 
     /** 匹配 {@code key=value} 形式的属性。值限定为小写字母/数字/下划线。 */
-    private static final java.util.regex.Pattern PROPERTY_PATTERN =
-            java.util.regex.Pattern.compile("([a-z_]+)=([a-z0-9_]+)");
+    private static final Pattern PROPERTY_PATTERN = Pattern.compile("([a-z_]+)=([a-z0-9_]+)");
 
     /** 状态属性名是否与红石/开关相关。 */
     private static boolean isRedstonePropertyName(@NotNull String name) {

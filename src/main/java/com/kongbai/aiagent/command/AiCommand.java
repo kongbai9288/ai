@@ -2,6 +2,7 @@ package com.kongbai.aiagent.command;
 
 import com.kongbai.aiagent.config.AiProfile;
 import com.kongbai.aiagent.config.ProfileManager;
+import com.kongbai.aiagent.machine.FakePlayerNaming;
 import com.kongbai.aiagent.machine.Machine;
 import com.kongbai.aiagent.machine.MachineState;
 import com.kongbai.aiagent.machine.MachineRegistry;
@@ -82,6 +83,7 @@ public final class AiCommand {
                 .then(buildAskNode())
                 .then(buildMachineNode())
                 .then(buildSchedNode())
+                .then(buildBotNode())
                 .then(buildEndNode())
                 .then(Commands.literal("perm")
                         .executes(ctx -> showPermissions(ctx.getSource())));
@@ -284,6 +286,29 @@ public final class AiCommand {
                         .executes(ctx -> machineStopAll(ctx.getSource())));
     }
 
+    /** {@code /carpet ai bot ...} 假人管理。 */
+    @NotNull
+    private static LiteralArgumentBuilder<CommandSourceStack> buildBotNode() {
+        return Commands.literal("bot")
+                .executes(ctx -> botInfo(ctx.getSource(), null))
+                .then(Commands.literal("list")
+                        .executes(ctx -> botList(ctx.getSource())))
+                .then(Commands.literal("info")
+                        .executes(ctx -> botInfo(ctx.getSource(), null)))
+                .then(Commands.literal("spawn")
+                        .then(Commands.argument("name", StringArgumentType.word())
+                                .executes(ctx -> botSpawn(ctx.getSource(),
+                                        StringArgumentType.getString(ctx, "name")))))
+                .then(Commands.literal("stop")
+                        .then(Commands.argument("name", StringArgumentType.word())
+                                .executes(ctx -> botStop(ctx.getSource(),
+                                        StringArgumentType.getString(ctx, "name")))))
+                .then(Commands.literal("kill")
+                        .then(Commands.argument("name", StringArgumentType.word())
+                                .executes(ctx -> botKill(ctx.getSource(),
+                                        StringArgumentType.getString(ctx, "name")))));
+    }
+
     /** {@code /carpet ai sched ...} 长期任务。 */
     @NotNull
     private static LiteralArgumentBuilder<CommandSourceStack> buildSchedNode() {
@@ -347,6 +372,10 @@ public final class AiCommand {
         send(source, "§7/carpet ai machine stopall §f彻底停止(关机器+停长期任务+停回放)");
         send(source, "§7/carpet ai machine setstate <名> on|off|unknown §f校正状态");
         send(source, "§7/carpet ai machine list|remove §f查看/删除");
+        send(source, "§8— 假人 —");
+        send(source, "§7/carpet ai bot info §f查看命名规则（自动加 ai_ 前缀）");
+        send(source, "§7/carpet ai bot spawn|stop|kill <名> §f召唤/停止/移除");
+        send(source, "§7/carpet ai bot list §f说明");
         send(source, "§8— 长期任务 —");
         send(source, "§7/carpet ai sched list|stop §f查看/停止长期任务");
         send(source, "§8— 其他 —");
@@ -676,7 +705,8 @@ public final class AiCommand {
             return 0;
         }
         send(source, "§a开始回放任务「" + task.name() + "」"
-                + (fakeName == null || fakeName.isBlank() ? "" : " → 假人 " + fakeName)
+                + (fakeName == null || fakeName.isBlank() ? ""
+                        : " → 假人 " + TaskRunner.normalizeFakeName(fakeName))
                 + (force ? " §6[强制]" : ""));
         send(source, "§7共 " + task.size() + " 个动作，预计 "
                 + String.format("%.1f", task.durationTicks() / 20.0) + " 秒");
@@ -1095,6 +1125,88 @@ public final class AiCommand {
         }
         send(source, "§a已开启 " + started + " 台机器"
                 + (skipped > 0 ? "，跳过 " + skipped + " 台（已是开启状态）" : ""));
+        return 1;
+    }
+
+    // ---------- 假人管理 ----------
+
+    /**
+     * 展示假人命名规则。
+     *
+     * <p>重点告诉玩家两件事：名字会被加 {@code ai_} 前缀（不会碰别人的假人），
+     * 以及同名的会复用（不新建存档数据）。
+     */
+    private static int botInfo(@NotNull CommandSourceStack source, String ignored) {
+        send(source, "§6假人命名规则");
+        send(source, "§7所有假人名自动加前缀 §f" + FakePlayerNaming.PREFIX + "§7，例如输入 "
+                + "§fbot1 §7→ §f" + FakePlayerNaming.normalize("bot1"));
+        send(source, "§7带前缀后不会误操作服务器里其他人已有的假人");
+        send(source, "§7同名假人会复用已召唤的那个，不新建存档数据（减少存储占用）");
+        send(source, "§7名字最长 " + FakePlayerNaming.MAX_LENGTH + " 字符，只含字母数字下划线");
+        return 1;
+    }
+
+    private static int botList(@NotNull CommandSourceStack source) {
+        send(source, "§6本模组管理的假人（前缀 " + FakePlayerNaming.PREFIX + "）");
+        send(source, "§7执行 §f/player list §7可查看服务器上全部假人");
+        send(source, "§7本模组只操作带 §f" + FakePlayerNaming.PREFIX + " §7前缀的，不会碰其他假人");
+        return 1;
+    }
+
+    private static int botSpawn(@NotNull CommandSourceStack source, String rawName) {
+        String name = FakePlayerNaming.normalize(rawName);
+        if (name == null) {
+            sendError(source, "假人名不能为空");
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        if (server == null) {
+            sendError(source, "服务器未就绪");
+            return 0;
+        }
+        // Carpet 的 /player X spawn 在 X 已存在时会复用，不新建存档条目
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(), FakePlayerNaming.spawnCommand(name));
+        send(source, "§a已请求召唤假人 §f" + name);
+        if (!rawName.equals(name)) {
+            send(source, "§7（已自动加前缀：§f" + rawName + " §7→ §f" + name + "§7）");
+        }
+        send(source, "§7若该假人已存在则会直接复用，不会新建存档数据");
+        return 1;
+    }
+
+    private static int botStop(@NotNull CommandSourceStack source, String rawName) {
+        String name = FakePlayerNaming.normalize(rawName);
+        if (name == null) {
+            sendError(source, "假人名不能为空");
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        if (server == null) {
+            sendError(source, "服务器未就绪");
+            return 0;
+        }
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(), FakePlayerNaming.stopCommand(name));
+        send(source, "§a已停止假人 §f" + name + " §7的当前动作");
+        return 1;
+    }
+
+    private static int botKill(@NotNull CommandSourceStack source, String rawName) {
+        String name = FakePlayerNaming.normalize(rawName);
+        if (name == null) {
+            sendError(source, "假人名不能为空");
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        if (server == null) {
+            sendError(source, "服务器未就绪");
+            return 0;
+        }
+        server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(), FakePlayerNaming.killCommand(name));
+        send(source, "§a已移除假人 §f" + name);
+        send(source, "§6注意：移除会清掉该假人的背包数据");
         return 1;
     }
 
