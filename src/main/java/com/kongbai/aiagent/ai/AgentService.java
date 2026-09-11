@@ -2,6 +2,8 @@ package com.kongbai.aiagent.ai;
 
 import com.kongbai.aiagent.config.AiProfile;
 import com.kongbai.aiagent.config.ProfileManager;
+import com.kongbai.aiagent.machine.Machine;
+import com.kongbai.aiagent.machine.MachineRegistry;
 import com.kongbai.aiagent.task.CommandSink;
 import com.kongbai.aiagent.task.Scheduler;
 import com.kongbai.aiagent.task.TaskRegistry;
@@ -11,6 +13,7 @@ import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -107,9 +110,16 @@ public final class AgentService {
             return;
         }
 
-        // 带上已有任务名，让 AI 知道可以调用哪些录制好的任务
+        // 带上任务名与机器状态，让 AI 知道现状再决定怎么操作
         List<String> taskNames = TaskRegistry.getInstance().names();
-        String prompt = AiPrompts.withTaskContext(message.trim(), taskNames);
+        List<String> machineStates = new ArrayList<>();
+        for (Machine machine : MachineRegistry.getInstance().all()) {
+            if (machine == null) {
+                continue;
+            }
+            machineStates.add(machine.name() + "=" + machine.state().display());
+        }
+        String prompt = AiPrompts.withFullContext(message.trim(), taskNames, machineStates);
 
         provider.chat(profile, prompt).whenComplete((raw, throwable) -> {
             // 注意：这里仍在 HTTP 线程，必须切回主线程才能动游戏

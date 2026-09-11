@@ -39,9 +39,14 @@ public final class Machine {
     private final String ownerName;
     private final int permLevel;
     private final long createdAt;
+    @NotNull
+    private final MachineState state;
+    /** 状态最后一次被明确设置的时间戳（毫秒）。用于判断状态是否可能已过期。 */
+    private final long stateUpdatedAt;
 
     private Machine(String name, @Nullable String onTask, @Nullable String offTask,
-                    UUID ownerUuid, String ownerName, int permLevel, long createdAt) {
+                    UUID ownerUuid, String ownerName, int permLevel, long createdAt,
+                    @NotNull MachineState state, long stateUpdatedAt) {
         this.name = name;
         this.onTask = onTask;
         this.offTask = offTask;
@@ -49,6 +54,8 @@ public final class Machine {
         this.ownerName = ownerName;
         this.permLevel = permLevel;
         this.createdAt = createdAt;
+        this.state = state == null ? MachineState.UNKNOWN : state;
+        this.stateUpdatedAt = stateUpdatedAt;
     }
 
     /**
@@ -70,12 +77,32 @@ public final class Machine {
         if (trimmed.length() > MAX_NAME_LENGTH) {
             throw new IllegalArgumentException("机器名过长（上限 " + MAX_NAME_LENGTH + " 字符）");
         }
+        long now = System.currentTimeMillis();
         return new Machine(trimmed,
                 normalize(onTask), normalize(offTask),
                 Objects.requireNonNull(ownerUuid, "ownerUuid"),
                 ownerName == null ? "" : ownerName,
                 Math.max(0, Math.min(4, permLevel)),
-                System.currentTimeMillis());
+                now, MachineState.UNKNOWN, now);
+    }
+
+    /**
+     * 生成一个副本，把状态设为 {@code newState}。
+     *
+     * <p><b>为什么不可变 + 整体替换</b>：状态变更需要落盘，
+     * 若用 setter 就地修改，会丢失「什么时候改的」这一信息，
+     * 也让并发读取（回放线程 / 命令线程）看到半更新的对象。
+     *
+     * @param newState 新状态；为 {@code null} 时视为 {@link MachineState#UNKNOWN}
+     */
+    @NotNull
+    public Machine withState(@Nullable MachineState newState) {
+        MachineState target = newState == null ? MachineState.UNKNOWN : newState;
+        if (target == this.state) {
+            return this; // 状态未变，不产生新对象
+        }
+        return new Machine(name, onTask, offTask, ownerUuid, ownerName, permLevel,
+                createdAt, target, System.currentTimeMillis());
     }
 
     @Nullable
@@ -126,6 +153,26 @@ public final class Machine {
         return createdAt;
     }
 
+    /** 当前状态，永不为 {@code null}。 */
+    @NotNull
+    public MachineState state() {
+        return state;
+    }
+
+    /**
+     * 状态最后更新时间。
+     *
+     * <p>用于提示玩家「这个状态是 3 天前记的，可能已经不准了」。
+     */
+    public long stateUpdatedAt() {
+        return stateUpdatedAt;
+    }
+
+    /** 状态是否已知（非 UNKNOWN）。 */
+    public boolean hasKnownState() {
+        return state != MachineState.UNKNOWN;
+    }
+
     public boolean hasOn() {
         return onTask != null;
     }
@@ -137,7 +184,8 @@ public final class Machine {
     @NotNull
     public String describe() {
         StringBuilder builder = new StringBuilder();
-        builder.append(name).append(" [");
+        builder.append(name).append(" ");
+        builder.append(state.color()).append('[').append(state.display()).append("]§r [");
         builder.append("开: ").append(onTask == null ? "未定义" : onTask).append(" | ");
         builder.append("关: ").append(offTask == null ? "未定义" : offTask).append("]");
         return builder.toString();
@@ -157,6 +205,8 @@ public final class Machine {
         obj.addProperty("ownerName", ownerName);
         obj.addProperty("permLevel", permLevel);
         obj.addProperty("createdAt", createdAt);
+        obj.addProperty("state", state.id());
+        obj.addProperty("stateUpdatedAt", stateUpdatedAt);
         return obj;
     }
 
@@ -200,11 +250,15 @@ public final class Machine {
         }
         var onElement = JsonUtil.path(obj, "onTask");
         var offElement = JsonUtil.path(obj, "offTask");
+        // 状态：读不到就当作 UNKNOWN（绝不猜成 ON 或 OFF）
+        MachineState state = MachineState.fromId(JsonUtil.stringOr(obj, "", "state"));
         try {
-            return Machine.of(name,
+            Machine machine = Machine.of(name,
                     onElement != null ? onElement.getAsString() : null,
                     offElement != null ? offElement.getAsString() : null,
                     uuid, JsonUtil.stringOr(obj, "", "ownerName"), permLevel);
+            // of() 造出来的是 UNKNOWN，这里换成存档里记录的状态
+            return machine.withState(state);
         } catch (RuntimeException e) {
             return null;
         }

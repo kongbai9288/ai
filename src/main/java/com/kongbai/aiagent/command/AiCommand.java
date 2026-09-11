@@ -3,6 +3,7 @@ package com.kongbai.aiagent.command;
 import com.kongbai.aiagent.config.AiProfile;
 import com.kongbai.aiagent.config.ProfileManager;
 import com.kongbai.aiagent.machine.Machine;
+import com.kongbai.aiagent.machine.MachineState;
 import com.kongbai.aiagent.machine.MachineRegistry;
 import com.kongbai.aiagent.task.RecordedTask;
 import com.kongbai.aiagent.task.RecorderManager;
@@ -26,7 +27,9 @@ import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 /**
@@ -244,15 +247,29 @@ public final class AiCommand {
                 .then(Commands.literal("on")
                         .then(Commands.argument("name", StringArgumentType.word())
                                 .executes(ctx -> machineSwitch(ctx.getSource(),
-                                        StringArgumentType.getString(ctx, "name"), true))))
+                                        StringArgumentType.getString(ctx, "name"), true, false))
+                                .then(Commands.literal("force")
+                                        .executes(ctx -> machineSwitch(ctx.getSource(),
+                                                StringArgumentType.getString(ctx, "name"), true, true)))))
                 .then(Commands.literal("off")
                         .then(Commands.argument("name", StringArgumentType.word())
                                 .executes(ctx -> machineSwitch(ctx.getSource(),
-                                        StringArgumentType.getString(ctx, "name"), false))))
+                                        StringArgumentType.getString(ctx, "name"), false, false))
+                                .then(Commands.literal("force")
+                                        .executes(ctx -> machineSwitch(ctx.getSource(),
+                                                StringArgumentType.getString(ctx, "name"), false, true)))))
+                .then(Commands.literal("setstate")
+                        .then(Commands.argument("name", StringArgumentType.word())
+                                .then(Commands.argument("state", StringArgumentType.word())
+                                        .executes(ctx -> machineSetState(ctx.getSource(),
+                                                StringArgumentType.getString(ctx, "name"),
+                                                StringArgumentType.getString(ctx, "state"))))))
                 .then(Commands.literal("offall")
                         .executes(ctx -> machineOffAll(ctx.getSource())))
                 .then(Commands.literal("onall")
-                        .executes(ctx -> machineOnAll(ctx.getSource())));
+                        .executes(ctx -> machineOnAll(ctx.getSource())))
+                .then(Commands.literal("stopall")
+                        .executes(ctx -> machineStopAll(ctx.getSource())));
     }
 
     /** {@code /carpet ai sched ...} 长期任务。 */
@@ -312,8 +329,10 @@ public final class AiCommand {
         send(source, "§7/carpet ai ask <话> §f命令方式问 AI（聊天触发失效时的兜底）");
         send(source, "§8— 机器 —");
         send(source, "§7/carpet ai machine add <名> <开任务> [关任务] §f定义机器");
-        send(source, "§7/carpet ai machine on|off <名> §f开关单台");
+        send(source, "§7/carpet ai machine on|off <名> [force] §f开关单台（已是该状态会跳过）");
         send(source, "§7/carpet ai machine offall §f一键关闭所有机器");
+        send(source, "§7/carpet ai machine stopall §f彻底停止(关机器+停长期任务+停回放)");
+        send(source, "§7/carpet ai machine setstate <名> on|off|unknown §f校正状态");
         send(source, "§7/carpet ai machine list|remove §f查看/删除");
         send(source, "§8— 长期任务 —");
         send(source, "§7/carpet ai sched list|stop §f查看/停止长期任务");
@@ -797,6 +816,16 @@ public final class AiCommand {
         for (Machine machine : registry.all()) {
             send(source, "§7- §f" + machine.describe());
         }
+        int unknown = 0;
+        for (Machine machine : registry.all()) {
+            if (machine != null && !machine.hasKnownState()) {
+                unknown++;
+            }
+        }
+        if (unknown > 0) {
+            send(source, "§6有 " + unknown + " 台机器状态未知（可能是你手动操作过）");
+            send(source, "§6用 §f/carpet ai machine setstate <名> on|off|unknown §6校正");
+        }
         send(source, "§7一键关闭所有：§f/carpet ai machine offall");
         return 1;
     }
@@ -806,12 +835,42 @@ public final class AiCommand {
      *
      * <p>本质是回放对应的录制任务，因此会保留录制时的时间顺序。
      */
-    private static int machineSwitch(@NotNull CommandSourceStack source, String rawName, boolean on) {
-        Machine machine = MachineRegistry.getInstance().get(rawName);
+    /**
+     * 开关单台机器（带状态幂等保护）。
+     *
+     * <p><b>为什么必须先查状态</b>：录制的开关任务是<b>动作</b>不是状态设置。
+     * 对按钮/拉杆型机器，在已关闭状态下再执行一次「关闭动作」等于又切换一次，
+     * 会把机器重新打开 —— 这正是「我说关闭它反而打开」的成因。
+     *
+     * <p><b>三态处理</b>：
+     * <ul>
+     *   <li>目标状态 == 当前状态 → <b>跳过</b>，提示已经是该状态（幂等）</li>
+     *   <li>当前 UNKNOWN → 执行，但明确警告状态未确认</li>
+     *   <li>其余 → 正常执行，执行后更新状态</li>
+     * </ul>
+     *
+     * @param force 为 true 时跳过幂等检查（用于状态可能不准时强制执行）
+     */
+    private static int machineSwitch(@NotNull CommandSourceStack source, String rawName,
+                                     boolean on, boolean force) {
+        MachineRegistry registry = MachineRegistry.getInstance();
+        Machine machine = registry.get(rawName);
         if (machine == null) {
             sendError(source, "机器不存在: " + rawName);
             return 0;
         }
+        MachineState target = on ? MachineState.ON : MachineState.OFF;
+        MachineState current = machine.state();
+
+        // 幂等保护：已经处于目标状态就不再执行动作
+        if (!force && current == target) {
+            send(source, "§7机器「" + machine.name() + "」已经是" + target.display()
+                    + "状态，已跳过（避免重复切换把它" + (on ? "关" : "开") + "了）");
+            send(source, "§7如果状态其实不准，用 §f/carpet ai machine setstate "
+                    + machine.name() + " " + (on ? "off" : "on") + " §7校正，或加 force 强制执行");
+            return 1;
+        }
+
         String taskName = on ? machine.onTask() : machine.offTask();
         if (taskName == null) {
             sendError(source, "机器「" + machine.name() + "」未定义"
@@ -828,11 +887,65 @@ public final class AiCommand {
             sendError(source, "启动失败：任务为空或回放已达上限");
             return 0;
         }
+
+        // 执行后更新状态
+        registry.put(machine.withState(target));
         send(source, "§a已" + (on ? "开启" : "关闭") + "机器「" + machine.name() + "」（任务 " + taskName + "）");
+        if (current == MachineState.UNKNOWN) {
+            send(source, "§6注意：之前状态未知，这次是盲操作。若机器实际没"
+                    + (on ? "开" : "关") + "，用 setstate 校正");
+        }
         return 1;
     }
 
-    /** 一键关闭所有机器 —— 需求里的核心场景。 */
+    /**
+     * 手动校正机器状态。
+     *
+     * <p><b>这是解决「手动开关机」的唯一入口</b>：
+     * 玩家在游戏里直接右键拉杆、或手动操作假人时，模组无法感知，
+     * 状态就会失真。这个命令让玩家把真实状态告诉模组。
+     *
+     * <p>也接受 {@code unknown} —— 用于「我也不知道现在什么状态」，
+     * 让系统在下次操作时走保守路径（提示而非盲目执行）。
+     */
+    private static int machineSetState(@NotNull CommandSourceStack source, String rawName, String rawState) {
+        MachineRegistry registry = MachineRegistry.getInstance();
+        Machine machine = registry.get(rawName);
+        if (machine == null) {
+            sendError(source, "机器不存在: " + rawName);
+            return 0;
+        }
+        String text = rawState == null ? "" : rawState.trim().toLowerCase(Locale.ROOT);
+        MachineState state;
+        switch (text) {
+            case "on", "开", "开启", "true" -> state = MachineState.ON;
+            case "off", "关", "关闭", "false" -> state = MachineState.OFF;
+            case "unknown", "未知", "?" -> state = MachineState.UNKNOWN;
+            default -> {
+                sendError(source, "状态只能是 on / off / unknown（也可写 开 / 关 / 未知）");
+                return 0;
+            }
+        }
+        if (!registry.put(machine.withState(state))) {
+            sendError(source, "保存失败，请查看服务端日志");
+            return 0;
+        }
+        send(source, "§a已将机器「" + machine.name() + "」状态设为 " + state.color() + state.display());
+        if (state == MachineState.UNKNOWN) {
+            send(source, "§7下次操作该机器时会走保守路径并提示确认");
+        }
+        return 1;
+    }
+
+    /**
+     * 一键关闭所有机器 —— 需求里的核心场景。
+     *
+     * <p><b>只处理「状态不是 OFF」的机器</b>。已经是 OFF 的跳过，
+     * 避免对已关闭的按钮型机器重复执行关闭动作而把它打开。
+     *
+     * <p>UNKNOWN 的机器会执行关闭（一键关停的安全方向就是关），
+     * 但会在结果里单独列出，让玩家知道哪些是盲操作。
+     */
     private static int machineOffAll(@NotNull CommandSourceStack source) {
         MachineRegistry registry = MachineRegistry.getInstance();
         if (!registry.isAttached()) {
@@ -847,19 +960,78 @@ public final class AiCommand {
         long tick = currentTick(source);
         TaskRunner runner = TaskRunner.getInstance();
         int started = 0;
+        int skipped = 0;
+        List<String> unknownNames = new ArrayList<>();
         for (Machine machine : withOff) {
+            if (machine == null) {
+                continue;
+            }
+            // 幂等：已关闭的不再动
+            if (machine.state() == MachineState.OFF) {
+                skipped++;
+                continue;
+            }
             RecordedTask task = TaskRegistry.getInstance().get(machine.offTask());
             if (task == null || task.isEmpty()) {
                 continue;
             }
             if (runner.start(task, null, tick) != null) {
                 started++;
+                if (machine.state() == MachineState.UNKNOWN) {
+                    unknownNames.add(machine.name());
+                }
+                registry.put(machine.withState(MachineState.OFF));
             }
         }
-        send(source, "§a已触发 " + started + " 台机器的关闭流程（共 " + withOff.size() + " 台有关闭任务）");
-        if (started < withOff.size()) {
-            send(source, "§6部分机器未能启动（可能已达并发上限 " + TaskRunner.MAX_CONCURRENT + "）");
+        send(source, "§a已触发 " + started + " 台机器的关闭流程"
+                + (skipped > 0 ? "，跳过 " + skipped + " 台（已是关闭状态）" : ""));
+        if (!unknownNames.isEmpty()) {
+            send(source, "§6其中状态未知的：§f" + String.join("、", unknownNames));
+            send(source, "§6这些是盲操作，请确认机器确实关了；不准的话用 setstate 校正");
         }
+        if (started == 0 && skipped > 0) {
+            send(source, "§7所有机器都已是关闭状态，无需操作");
+        }
+        send(source, "§7若要同时停掉长期任务和回放：§f/carpet ai machine stopall");
+        return 1;
+    }
+
+    /**
+     * 彻底停止一切：执行所有关闭任务 + 停所有长期任务 + 停所有回放。
+     *
+     * <p><b>为什么需要它</b>：{@code offall} 只管「执行关闭任务」，
+     * 但一个 {@code longRunning} 的 AI 长期任务可能仍在后台反复开启机器。
+     * 这个命令才是真正意义上的「全部停下」。
+     */
+    private static int machineStopAll(@NotNull CommandSourceStack source) {
+        MachineRegistry registry = MachineRegistry.getInstance();
+        long tick = currentTick(source);
+        TaskRunner runner = TaskRunner.getInstance();
+        Scheduler scheduler = Scheduler.getInstance();
+
+        int machines = 0;
+        if (registry.isAttached()) {
+            for (Machine machine : registry.allWithOff()) {
+                if (machine == null || machine.state() == MachineState.OFF) {
+                    continue;
+                }
+                RecordedTask task = TaskRegistry.getInstance().get(machine.offTask());
+                if (task == null || task.isEmpty()) {
+                    continue;
+                }
+                if (runner.start(task, null, tick) != null) {
+                    machines++;
+                    registry.put(machine.withState(MachineState.OFF));
+                }
+            }
+        }
+        int scheduled = scheduler.activeCount();
+        scheduler.stopAll();
+        int playbacks = runner.activeCount();
+        runner.stopAll();
+
+        send(source, "§a已彻底停止：关闭 " + machines + " 台机器，停 " + scheduled
+                + " 个长期任务，停 " + playbacks + " 个回放");
         return 1;
     }
 
@@ -872,8 +1044,14 @@ public final class AiCommand {
         long tick = currentTick(source);
         TaskRunner runner = TaskRunner.getInstance();
         int started = 0;
+        int skipped = 0;
         for (Machine machine : registry.all()) {
             if (machine == null || !machine.hasOn()) {
+                continue;
+            }
+            // 幂等：已开启的不再动
+            if (machine.state() == MachineState.ON) {
+                skipped++;
                 continue;
             }
             RecordedTask task = TaskRegistry.getInstance().get(machine.onTask());
@@ -882,9 +1060,11 @@ public final class AiCommand {
             }
             if (runner.start(task, null, tick) != null) {
                 started++;
+                registry.put(machine.withState(MachineState.ON));
             }
         }
-        send(source, "§a已开启 " + started + " 台机器");
+        send(source, "§a已开启 " + started + " 台机器"
+                + (skipped > 0 ? "，跳过 " + skipped + " 台（已是开启状态）" : ""));
         return 1;
     }
 

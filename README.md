@@ -100,7 +100,26 @@ AI 会返回约定的 JSON 并执行，格式：
 /carpet ai machine add 刷石机 刷石机开 刷石机关
 
 /carpet ai machine offall        ← 一键关闭所有机器
+/carpet ai machine stopall       ← 彻底停止(关机器+停长期任务+停回放)
 ```
+
+### ⚠️ 机器状态与手动操作
+
+录制的开关任务是**动作**（按一下按钮），不是**状态设置**（设成关）。
+对按钮/拉杆型机器，在已关闭状态下再执行一次"关闭动作"等于**又按一次 = 打开**。
+
+因此机器有三态：`开启 / 关闭 / 未知`。
+
+- 已经是目标状态时，`on` / `off` 会**跳过**并提示，不会重复切换
+- `offall` 只处理"状态不是关闭"的机器
+- **手动开关机后模组无法感知**，需要用 `setstate` 校正：
+
+```
+/carpet ai machine setstate 刷石机 off     ← 告诉模组它现在是关的
+/carpet ai machine setstate 刷石机 unknown ← 不确定就标未知，下次操作会提示确认
+```
+
+状态存进 `aiagent/aiagent_machines.json`，随存档持久化。
 
 ---
 
