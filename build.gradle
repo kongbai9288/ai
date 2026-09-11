@@ -12,7 +12,17 @@ base {
 }
 
 repositories {
-    // Carpet 官方 Maven（必需）
+    // Carpet：优先走 Modrinth Maven（官方发布渠道，版本号确定）
+    exclusiveContent {
+        forRepository {
+            maven {
+                name = "Modrinth"
+                url = "https://api.modrinth.com/maven"
+            }
+        }
+        filter { includeGroup "maven.modrinth" }
+    }
+    // 备用：Carpet 作者自建仓库
     maven { url 'https://masa.dy.fi/maven' }
     mavenCentral()
 }
@@ -35,8 +45,10 @@ dependencies {
     implementation "net.fabricmc:fabric-loader:${loader_version}"
     implementation "net.fabricmc.fabric-api:fabric-api:${fabric_api_version}"
 
-    // Carpet 核心：编译期依赖，运行时由玩家自行安装
-    compileOnly "carpet:fabric-carpet:${minecraft_version}-${carpet_core_version}"
+    // Carpet 核心：编译期依赖，运行时由玩家自行安装。
+    // 坐标用 Modrinth Maven 的 maven.modrinth:<slug>:<version>，
+    // 不用 carpet:fabric-carpet（该坐标在 masa 仓库上的版本命名不稳定，易解析失败）。
+    compileOnly "maven.modrinth:carpet:${carpet_core_version}"
 
     // GSON 与 java.net.http.HttpClient 均由 Minecraft / JDK 自带，无需额外引入
 }
