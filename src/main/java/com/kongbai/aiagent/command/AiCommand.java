@@ -2,8 +2,11 @@ package com.kongbai.aiagent.command;
 
 import com.kongbai.aiagent.config.AiProfile;
 import com.kongbai.aiagent.config.ProfileManager;
+import com.kongbai.aiagent.machine.Machine;
+import com.kongbai.aiagent.machine.MachineRegistry;
 import com.kongbai.aiagent.task.RecordedTask;
 import com.kongbai.aiagent.task.RecorderManager;
+import com.kongbai.aiagent.task.Scheduler;
 import com.kongbai.aiagent.task.TaskRecorder;
 import com.kongbai.aiagent.task.TaskRegistry;
 import com.kongbai.aiagent.task.TaskRunner;
@@ -71,6 +74,10 @@ public final class AiCommand {
                 .then(buildRecNode())
                 .then(buildTaskNode())
                 .then(buildRunNode())
+                .then(buildAskNode())
+                .then(buildMachineNode())
+                .then(buildSchedNode())
+                .then(buildEndNode())
                 .then(Commands.literal("perm")
                         .executes(ctx -> showPermissions(ctx.getSource())));
 
@@ -191,6 +198,89 @@ public final class AiCommand {
                         .executes(ctx -> runList(ctx.getSource())));
     }
 
+    /**
+     * {@code /carpet ai ask <话>} 直接问 AI。
+     *
+     * <p>这是聊天触发（「你好，ai ...」）的兜底入口 ——
+     * 当 mixin 未生效时，玩家仍可用命令与 AI 对话。
+     */
+    @NotNull
+    private static LiteralArgumentBuilder<CommandSourceStack> buildAskNode() {
+        return Commands.literal("ask")
+                .executes(ctx -> {
+                    sendError(ctx.getSource(), "用法: /carpet ai ask <你想让 AI 做的事>");
+                    return 0;
+                })
+                .then(Commands.argument("question", StringArgumentType.greedyString())
+                        .executes(ctx -> askAi(ctx.getSource(),
+                                StringArgumentType.getString(ctx, "question"))));
+    }
+
+    /** {@code /carpet ai machine ...} 机器管理。 */
+    @NotNull
+    private static LiteralArgumentBuilder<CommandSourceStack> buildMachineNode() {
+        return Commands.literal("machine")
+                .executes(ctx -> machineList(ctx.getSource()))
+                .then(Commands.literal("list")
+                        .executes(ctx -> machineList(ctx.getSource())))
+                .then(Commands.literal("add")
+                        .then(Commands.argument("name", StringArgumentType.word())
+                                .then(Commands.argument("onTask", StringArgumentType.word())
+                                        .executes(ctx -> machineAdd(ctx.getSource(),
+                                                StringArgumentType.getString(ctx, "name"),
+                                                StringArgumentType.getString(ctx, "onTask"),
+                                                null))
+                                        .then(Commands.argument("offTask", StringArgumentType.word())
+                                                .executes(ctx -> machineAdd(ctx.getSource(),
+                                                        StringArgumentType.getString(ctx, "name"),
+                                                        StringArgumentType.getString(ctx, "onTask"),
+                                                        StringArgumentType.getString(ctx, "offTask")))))))
+                .then(Commands.literal("remove")
+                        .then(Commands.argument("name", StringArgumentType.word())
+                                .executes(ctx -> machineRemove(ctx.getSource(),
+                                        StringArgumentType.getString(ctx, "name")))))
+                .then(Commands.literal("on")
+                        .then(Commands.argument("name", StringArgumentType.word())
+                                .executes(ctx -> machineSwitch(ctx.getSource(),
+                                        StringArgumentType.getString(ctx, "name"), true))))
+                .then(Commands.literal("off")
+                        .then(Commands.argument("name", StringArgumentType.word())
+                                .executes(ctx -> machineSwitch(ctx.getSource(),
+                                        StringArgumentType.getString(ctx, "name"), false))))
+                .then(Commands.literal("offall")
+                        .executes(ctx -> machineOffAll(ctx.getSource())))
+                .then(Commands.literal("onall")
+                        .executes(ctx -> machineOnAll(ctx.getSource())));
+    }
+
+    /** {@code /carpet ai sched ...} 长期任务。 */
+    @NotNull
+    private static LiteralArgumentBuilder<CommandSourceStack> buildSchedNode() {
+        return Commands.literal("sched")
+                .executes(ctx -> schedList(ctx.getSource()))
+                .then(Commands.literal("list")
+                        .executes(ctx -> schedList(ctx.getSource())))
+                .then(Commands.literal("stop")
+                        .executes(ctx -> schedStop(ctx.getSource())));
+    }
+
+    /**
+     * {@code /carpet ai end ...} 需求里「end / confirm」的入口。
+     *
+     * <p>{@code end confirm} 等价于 {@code run all}：执行所有已保存任务。
+     */
+    @NotNull
+    private static LiteralArgumentBuilder<CommandSourceStack> buildEndNode() {
+        return Commands.literal("end")
+                .then(Commands.literal("confirm")
+                        .executes(ctx -> runAll(ctx.getSource(), null))
+                        .then(Commands.argument("fake", StringArgumentType.word())
+                                .executes(ctx -> runAll(ctx.getSource(),
+                                        StringArgumentType.getString(ctx, "fake")))))
+                .then(Commands.literal("cancel")
+                        .executes(ctx -> runStop(ctx.getSource())));
+    }
+
     // ---------- 具体实现 ----------
 
     private static int showHelp(@NotNull CommandSourceStack source) {
@@ -215,7 +305,18 @@ public final class AiCommand {
         send(source, "§7/carpet ai run all [假人名] §f回放所有任务");
         send(source, "§7/carpet ai run list §f查看进行中的回放");
         send(source, "§7/carpet ai run stop §f停止所有回放");
+        send(source, "§8— AI 对话 —");
+        send(source, "§7你好，ai <话> §f聊天里直接触发（也支持 你好ai / hi,ai）");
+        send(source, "§7/carpet ai ask <话> §f命令方式问 AI（聊天触发失效时的兜底）");
+        send(source, "§8— 机器 —");
+        send(source, "§7/carpet ai machine add <名> <开任务> [关任务] §f定义机器");
+        send(source, "§7/carpet ai machine on|off <名> §f开关单台");
+        send(source, "§7/carpet ai machine offall §f一键关闭所有机器");
+        send(source, "§7/carpet ai machine list|remove §f查看/删除");
+        send(source, "§8— 长期任务 —");
+        send(source, "§7/carpet ai sched list|stop §f查看/停止长期任务");
         send(source, "§8— 其他 —");
+        send(source, "§7/carpet ai end confirm §f执行所有任务（等价 run all）");
         send(source, "§7/carpet ai perm §f查看 AI 可执行命令范围");
         return 1;
     }
@@ -590,6 +691,221 @@ public final class AiCommand {
         for (String line : runner.activeNames()) {
             send(source, "§7- §f" + line);
         }
+        return 1;
+    }
+
+    // ---------- AI 对话 ----------
+
+    private static int askAi(@NotNull CommandSourceStack source, String question) {
+        var player = source.getPlayer();
+        if (player == null) {
+            sendError(source, "该命令只能由玩家执行");
+            return 0;
+        }
+        String text = question == null ? "" : question.trim();
+        if (text.isEmpty()) {
+            sendError(source, "用法: /carpet ai ask <你想让 AI 做的事>");
+            return 0;
+        }
+        try {
+            com.kongbai.aiagent.ai.ChatTrigger.dispatch(player, text);
+            return 1;
+        } catch (RuntimeException e) {
+            sendError(source, "AI 调用失败: " + e.getMessage());
+            return 0;
+        }
+    }
+
+    // ---------- 机器管理 ----------
+
+    private static int machineAdd(@NotNull CommandSourceStack source, String name, String onTask, String offTask) {
+        UUID uuid = playerUuid(source);
+        if (uuid == null) {
+            sendError(source, "该命令只能由玩家执行");
+            return 0;
+        }
+        MachineRegistry registry = MachineRegistry.getInstance();
+        if (!registry.isAttached()) {
+            sendError(source, "机器系统尚未就绪（世界未加载）");
+            return 0;
+        }
+        TaskRegistry tasks = TaskRegistry.getInstance();
+        // 校验引用的任务确实存在，避免建出指向空任务的机器
+        if (onTask != null && !onTask.isBlank() && tasks.get(onTask) == null) {
+            sendError(source, "开启任务不存在: " + onTask);
+            return 0;
+        }
+        if (offTask != null && !offTask.isBlank() && tasks.get(offTask) == null) {
+            sendError(source, "关闭任务不存在: " + offTask);
+            return 0;
+        }
+        Machine machine;
+        try {
+            machine = Machine.of(name, onTask, offTask, uuid, playerName(source),
+                    PermissionGuard.levelOf(source));
+        } catch (IllegalArgumentException e) {
+            sendError(source, "参数无效: " + e.getMessage());
+            return 0;
+        }
+        boolean existed = registry.exists(name);
+        if (!registry.put(machine)) {
+            sendError(source, "保存失败，请查看服务端日志");
+            return 0;
+        }
+        send(source, "§a已" + (existed ? "更新" : "添加") + "机器「" + machine.name() + "」");
+        send(source, "§7" + machine.describe());
+        return 1;
+    }
+
+    private static int machineRemove(@NotNull CommandSourceStack source, String name) {
+        Machine machine = MachineRegistry.getInstance().get(name);
+        if (machine == null) {
+            sendError(source, "机器不存在: " + name);
+            return 0;
+        }
+        UUID uuid = playerUuid(source);
+        boolean isOwner = uuid != null && uuid.equals(machine.ownerUuid());
+        boolean isAdmin = PermissionGuard.levelOf(source) > machine.permLevel();
+        if (!isOwner && !isAdmin) {
+            sendError(source, "只有创建者本人可以删除该机器");
+            return 0;
+        }
+        MachineRegistry.getInstance().remove(name);
+        send(source, "§a已删除机器「" + machine.name() + "」");
+        return 1;
+    }
+
+    private static int machineList(@NotNull CommandSourceStack source) {
+        MachineRegistry registry = MachineRegistry.getInstance();
+        if (!registry.isAttached()) {
+            sendError(source, "机器系统尚未就绪（世界未加载）");
+            return 0;
+        }
+        if (registry.size() == 0) {
+            send(source, "§7还没有定义任何机器");
+            send(source, "§7先录两个任务（开 / 关），再 §f/carpet ai machine add <名> <开任务> <关任务>");
+            return 1;
+        }
+        send(source, "§6机器列表（共 " + registry.size() + "）");
+        for (Machine machine : registry.all()) {
+            send(source, "§7- §f" + machine.describe());
+        }
+        send(source, "§7一键关闭所有：§f/carpet ai machine offall");
+        return 1;
+    }
+
+    /**
+     * 开关单台机器。
+     *
+     * <p>本质是回放对应的录制任务，因此会保留录制时的时间顺序。
+     */
+    private static int machineSwitch(@NotNull CommandSourceStack source, String rawName, boolean on) {
+        Machine machine = MachineRegistry.getInstance().get(rawName);
+        if (machine == null) {
+            sendError(source, "机器不存在: " + rawName);
+            return 0;
+        }
+        String taskName = on ? machine.onTask() : machine.offTask();
+        if (taskName == null) {
+            sendError(source, "机器「" + machine.name() + "」未定义"
+                    + (on ? "开启" : "关闭") + "任务");
+            return 0;
+        }
+        RecordedTask task = TaskRegistry.getInstance().get(taskName);
+        if (task == null) {
+            sendError(source, "关联的任务已不存在: " + taskName);
+            return 0;
+        }
+        Long id = TaskRunner.getInstance().start(task, null, currentTick(source));
+        if (id == null) {
+            sendError(source, "启动失败：任务为空或回放已达上限");
+            return 0;
+        }
+        send(source, "§a已" + (on ? "开启" : "关闭") + "机器「" + machine.name() + "」（任务 " + taskName + "）");
+        return 1;
+    }
+
+    /** 一键关闭所有机器 —— 需求里的核心场景。 */
+    private static int machineOffAll(@NotNull CommandSourceStack source) {
+        MachineRegistry registry = MachineRegistry.getInstance();
+        if (!registry.isAttached()) {
+            sendError(source, "机器系统尚未就绪");
+            return 0;
+        }
+        List<Machine> withOff = registry.allWithOff();
+        if (withOff.isEmpty()) {
+            send(source, "§7没有定义了关闭任务的机器");
+            return 1;
+        }
+        long tick = currentTick(source);
+        TaskRunner runner = TaskRunner.getInstance();
+        int started = 0;
+        for (Machine machine : withOff) {
+            RecordedTask task = TaskRegistry.getInstance().get(machine.offTask());
+            if (task == null || task.isEmpty()) {
+                continue;
+            }
+            if (runner.start(task, null, tick) != null) {
+                started++;
+            }
+        }
+        send(source, "§a已触发 " + started + " 台机器的关闭流程（共 " + withOff.size() + " 台有关闭任务）");
+        if (started < withOff.size()) {
+            send(source, "§6部分机器未能启动（可能已达并发上限 " + TaskRunner.MAX_CONCURRENT + "）");
+        }
+        return 1;
+    }
+
+    private static int machineOnAll(@NotNull CommandSourceStack source) {
+        MachineRegistry registry = MachineRegistry.getInstance();
+        if (!registry.isAttached()) {
+            sendError(source, "机器系统尚未就绪");
+            return 0;
+        }
+        long tick = currentTick(source);
+        TaskRunner runner = TaskRunner.getInstance();
+        int started = 0;
+        for (Machine machine : registry.all()) {
+            if (machine == null || !machine.hasOn()) {
+                continue;
+            }
+            RecordedTask task = TaskRegistry.getInstance().get(machine.onTask());
+            if (task == null || task.isEmpty()) {
+                continue;
+            }
+            if (runner.start(task, null, tick) != null) {
+                started++;
+            }
+        }
+        send(source, "§a已开启 " + started + " 台机器");
+        return 1;
+    }
+
+    // ---------- 长期任务 ----------
+
+    private static int schedList(@NotNull CommandSourceStack source) {
+        Scheduler scheduler = Scheduler.getInstance();
+        if (!scheduler.hasActive()) {
+            send(source, "§7当前没有进行中的长期任务");
+            return 1;
+        }
+        send(source, "§6进行中的长期任务（共 " + scheduler.activeCount() + "）");
+        for (String line : scheduler.activeNames()) {
+            send(source, "§7- §f" + line);
+        }
+        send(source, "§7停止全部：§f/carpet ai sched stop");
+        return 1;
+    }
+
+    private static int schedStop(@NotNull CommandSourceStack source) {
+        Scheduler scheduler = Scheduler.getInstance();
+        int count = scheduler.activeCount();
+        if (count == 0) {
+            send(source, "§7当前没有进行中的长期任务");
+            return 1;
+        }
+        scheduler.stopAll();
+        send(source, "§a已停止 " + count + " 个长期任务");
         return 1;
     }
 

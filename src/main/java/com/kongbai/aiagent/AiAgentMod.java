@@ -4,9 +4,12 @@ import carpet.CarpetServer;
 import carpet.api.CarpetExtension;
 import com.kongbai.aiagent.command.AiCommand;
 import com.kongbai.aiagent.config.ProfileManager;
+import com.kongbai.aiagent.ai.AgentService;
+import com.kongbai.aiagent.machine.MachineRegistry;
 import com.kongbai.aiagent.task.CommandSink;
 import com.kongbai.aiagent.task.RecordedTask;
 import com.kongbai.aiagent.task.RecorderManager;
+import com.kongbai.aiagent.task.Scheduler;
 import com.kongbai.aiagent.task.TaskRecorder;
 import com.kongbai.aiagent.task.TaskRegistry;
 import com.kongbai.aiagent.task.TaskRunner;
@@ -106,7 +109,8 @@ public class AiAgentMod implements ModInitializer {
             }
             ProfileManager.getInstance().attach(saveDir);
             TaskRegistry.getInstance().attach(saveDir);
-            LOGGER.info("[假人智能] 配置与任务系统已挂载: {}", saveDir);
+            MachineRegistry.getInstance().attach(saveDir);
+            LOGGER.info("[假人智能] 配置/任务/机器系统已挂载: {}", saveDir);
         }
 
         @Override
@@ -115,8 +119,11 @@ public class AiAgentMod implements ModInitializer {
             // 缺了这步，换世界会残留上一个世界的数据，且内存随玩家/任务数只增不减
             ProfileManager.getInstance().detach();
             TaskRegistry.getInstance().detach();
+            MachineRegistry.getInstance().detach();
             RecorderManager.getInstance().abortAll();
             TaskRunner.getInstance().stopAll();
+            Scheduler.getInstance().stopAll();
+            AgentService.getInstance().shutdown();
             LOGGER.info("[假人智能] 已卸载并保存全部数据");
         }
 
@@ -136,7 +143,9 @@ public class AiAgentMod implements ModInitializer {
             }
             RecorderManager recorders = RecorderManager.getInstance();
             TaskRunner runner = TaskRunner.getInstance();
-            if (recorders.activeCount() == 0 && !runner.hasActive()) {
+            Scheduler scheduler = Scheduler.getInstance();
+            boolean needTick = recorders.activeCount() > 0 || runner.hasActive() || scheduler.hasActive();
+            if (!needTick) {
                 return;
             }
             long tick = server.getTickCount();
@@ -146,6 +155,10 @@ public class AiAgentMod implements ModInitializer {
             }
             if (runner.hasActive()) {
                 List<String> messages = runner.tick(tick, createSink(server));
+                broadcast(server, messages);
+            }
+            if (scheduler.hasActive()) {
+                List<String> messages = scheduler.tick(tick, createSink(server));
                 broadcast(server, messages);
             }
         }

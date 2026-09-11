@@ -7,6 +7,7 @@
     "defaultRequire": 0
   },
   "mixins": [
-    "CommandsMixin"
+    "CommandsMixin",
+    "ChatMixin"
   ]
 }
