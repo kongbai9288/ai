@@ -2,7 +2,7 @@
 
 Minecraft **26.2** + Fabric + Carpet 的附属模组。让 AI 通过 Carpet 命令驱动假人执行任务。
 
-> **当前阶段**：M2（骨架 + AI 配置 + 任务录制/回放）。AI 对话执行尚未实现。
+> **当前阶段**：M1–M5 全部完成（AI 配置 / 任务录制回放 / AI 对话引擎 / 长期任务 / 机器管理）。
 > **运行环境**：客户端（单机世界内的集成服务端）。后续会迁移到独立服务端，代码结构已按此预留。
 
 ---
@@ -68,6 +68,40 @@ Minecraft **26.2** + Fabric + Carpet 的附属模组。让 AI 通过 Carpet 命�
 
 每个玩家的配置相互隔离，各用各的 —— 谁发起任务就用谁的 API。
 
+### 与 AI 对话
+
+```
+你好，ai 让 bot1 开始挖矿        ← 聊天直接触发
+/carpet ai ask <话>              ← 命令方式（聊天触发失效时的兜底）
+```
+
+AI 会返回约定的 JSON 并执行，格式：
+
+```json
+{
+  "longRunning": true,
+  "deadline": -1,
+  "fakePlayer": "bot1",
+  "commands": ["player bot1 use continuous"],
+  "reply": "已开启"
+}
+```
+
+`deadline` 为 `-1` 表示一直执行，正整数表示 N 秒后自动停止。
+字段也接受中文键名（`是否长期执行` / `执行终止时间` / `假人名` / `执行命令`）。
+
+### 机器管理
+
+先录两个任务（怎么开 / 怎么关），再定义成一台机器：
+
+```
+/carpet ai rec 刷石机开    ... /carpet ai rec stop
+/carpet ai rec 刷石机关    ... /carpet ai rec stop
+/carpet ai machine add 刷石机 刷石机开 刷石机关
+
+/carpet ai machine offall        ← 一键关闭所有机器
+```
+
 ---
 
 ## 防提权设计
@@ -119,11 +153,12 @@ src/main/java/com/kongbai/aiagent/
 |---|---|---|
 | M1 | 骨架 + AI 接入配置 + 权限闸门 | ✅ |
 | M2 | 任务录制/回放（`/carpet ai rec` / `task` / `run`） | ✅ |
-| M3 | AI 对话与执行引擎 | 待做 |
-| M4 | 长期任务调度（JSON 事件格式） | 待做 |
-| M5 | 一键关停、机器管理、服务端迁移 | 待做 |
+| M3 | AI 对话与执行引擎（`/carpet ai ask` + 聊天触发） | ✅ |
+| M4 | 长期任务调度（JSON 事件格式，`/carpet ai sched`） | ✅ |
+| M5 | 机器管理与一键关停（`/carpet ai machine`） | ✅ |
+| M6 | 服务端迁移 | 待做 |
 
-代码审查报告：[REVIEW_M1.md](REVIEW_M1.md) / [REVIEW_M2.md](REVIEW_M2.md)
+代码审查报告：[REVIEW_M1](REVIEW_M1.md) / [REVIEW_M2](REVIEW_M2.md) / [REVIEW_M3_M5](REVIEW_M3_M5.md)
 
 ## 许可
 

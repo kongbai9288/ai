@@ -52,10 +52,16 @@ public interface AiProvider {
     /**
      * AI 调用失败的统一异常。
      *
-     * <p><b>消息必须可展示给玩家</b> —— 因此构造时会抹去密钥等敏感信息，
+     * <p><b>为什么是 RuntimeException（非受检）</b>：
+     * 这类异常主要在 {@link java.util.concurrent.CompletableFuture}
+     * 的 lambda（{@code thenApply} / {@code whenComplete}）中抛出，
+     * 而 lambda 的方法签名不允许抛受检异常。
+     * 改成非受检后可以直接在 lambda 里抛，由 {@code whenComplete} 统一捕获。
+     *
+     * <p><b>消息必须可展示给玩家</b> —— 因此会抹去密钥等敏感信息，
      * 且不允许把原始响应体（可能含密钥回显）直接放进消息。
      */
-    final class AiException extends Exception {
+    final class AiException extends RuntimeException {
         private static final long serialVersionUID = 1L;
 
         public AiException(@Nullable String message) {

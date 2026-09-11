@@ -226,7 +226,7 @@ public final class RecordedAction {
                     yield cmd.isEmpty() ? null : RecordedAction.command(tick, cmd);
                 }
             };
-        } catch (IllegalArgumentException | NumberFormatException | UnsupportedOperationException e) {
+        } catch (IllegalArgumentException | UnsupportedOperationException e) {
             return null;
         }
     }
