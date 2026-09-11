@@ -1,11 +1,14 @@
 package com.kongbai.aiagent.mixin;
 
+import com.kongbai.aiagent.task.BlockProbe;
+import com.kongbai.aiagent.task.LevelBlockProbe;
 import com.kongbai.aiagent.task.RecorderManager;
 import com.kongbai.aiagent.task.TaskRecorder;
 import com.mojang.brigadier.ParseResults;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -66,7 +69,19 @@ public class CommandsMixin {
             long tick = server == null ? 0L : server.getTickCount();
             // 去掉前导 "/"，保持与玩家输入一致的外观
             String normalized = command.startsWith("/") ? command.substring(1) : command;
-            recorder.recordCommand(tick, normalized);
+
+            // 构造方块采集器：只在本次调用内使用，不缓存
+            // （LevelBlockProbe 持有 ServerLevel，长期持有会导致世界无法卸载）
+            BlockProbe probe = null;
+            try {
+                var level = source.getPlayer().level();
+                if (level instanceof ServerLevel serverLevel) {
+                    probe = new LevelBlockProbe(serverLevel);
+                }
+            } catch (Throwable ignored) {
+                probe = null; // 拿不到就降级：不采集快照，命令照常记录
+            }
+            recorder.recordCommand(tick, normalized, probe);
         } catch (Throwable t) {
             // 吞掉一切异常：录制逻辑绝不能阻断原版命令执行
         }

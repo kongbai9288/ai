@@ -157,6 +157,33 @@ public final class RecordedTask {
         return actions.isEmpty();
     }
 
+    /**
+     * 该任务是否包含可用于状态检测的快照。
+     *
+     * <p>用于回放开始时决定要不要提示「正在检测机器状态」。
+     * 没有任何快照的任务（比如录制时周围没有红石方块，
+     * 或录制功能当时不可用）不会触发检测，也就不需要提示。
+     */
+    public boolean hasStateCheck() {
+        for (RecordedAction action : actions) {
+            if (action != null && action.hasSnapshots()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 含快照的动作数量，用于 ${code task info} 展示。 */
+    public int snapshotActionCount() {
+        int count = 0;
+        for (RecordedAction action : actions) {
+            if (action != null && action.hasSnapshots()) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     /** 任务总时长（游戏刻）。空任务返回 0。 */
     public long durationTicks() {
         if (actions.isEmpty()) {

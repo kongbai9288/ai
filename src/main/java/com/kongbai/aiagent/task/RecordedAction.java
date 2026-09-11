@@ -5,6 +5,7 @@ import com.kongbai.aiagent.util.JsonUtil;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 
@@ -66,9 +67,19 @@ public final class RecordedAction {
     private final float pitch;
     @Nullable
     private final String command;
+    /**
+     * 执行该命令<b>前</b>采集的方块状态快照。
+     *
+     * <p>仅 {@link Type#COMMAND} 有意义，其余类型恒为空列表。
+     * 语义是「执行命令前现场长什么样」——回放时若当前状态与此一致，
+     * 说明这活儿还没干过，需要执行；不一致则说明已经干过了，应跳过。
+     */
+    @NotNull
+    private final List<BlockSnapshot> snapshots;
 
     private RecordedAction(Type type, long tickOffset, double x, double y, double z,
-                           float yaw, float pitch, @Nullable String command) {
+                           float yaw, float pitch, @Nullable String command,
+                           @NotNull List<BlockSnapshot> snapshots) {
         this.type = type;
         this.tickOffset = tickOffset;
         this.x = x;
@@ -77,6 +88,7 @@ public final class RecordedAction {
         this.yaw = yaw;
         this.pitch = pitch;
         this.command = command;
+        this.snapshots = snapshots == null ? List.of() : List.copyOf(snapshots);
     }
 
     // ---------- 工厂 ----------
@@ -87,7 +99,7 @@ public final class RecordedAction {
         validateFinite(x, "x");
         validateFinite(y, "y");
         validateFinite(z, "z");
-        return new RecordedAction(Type.MOVE, tickOffset, x, y, z, 0f, 0f, null);
+        return new RecordedAction(Type.MOVE, tickOffset, x, y, z, 0f, 0f, null, List.of());
     }
 
     /** 构造视角动作。 */
@@ -95,7 +107,7 @@ public final class RecordedAction {
     public static RecordedAction look(long tickOffset, float yaw, float pitch) {
         validateFinite(yaw, "yaw");
         validateFinite(pitch, "pitch");
-        return new RecordedAction(Type.LOOK, tickOffset, 0, 0, 0, yaw, pitch, null);
+        return new RecordedAction(Type.LOOK, tickOffset, 0, 0, 0, yaw, pitch, null, List.of());
     }
 
     /**
@@ -106,11 +118,30 @@ public final class RecordedAction {
      */
     @NotNull
     public static RecordedAction command(long tickOffset, @NotNull String command) {
+        return command(tickOffset, command, List.of());
+    }
+
+    /**
+     * 构造带状态快照的命令动作。
+     *
+     * @param snapshots 执行命令前采集的方块状态；为 {@code null} 视为空
+     */
+    @NotNull
+    public static RecordedAction command(long tickOffset, @NotNull String command,
+                                         @Nullable List<BlockSnapshot> snapshots) {
         String trimmed = command == null ? "" : command.trim();
         if (trimmed.isEmpty()) {
             throw new IllegalArgumentException("命令不能为空");
         }
-        return new RecordedAction(Type.COMMAND, tickOffset, 0, 0, 0, 0f, 0f, trimmed);
+        // 快照上限，防止单条动作撑爆存档
+        List<BlockSnapshot> safe = List.of();
+        if (snapshots != null && !snapshots.isEmpty()) {
+            safe = snapshots.stream()
+                    .filter(java.util.Objects::nonNull)
+                    .limit(96)
+                    .toList();
+        }
+        return new RecordedAction(Type.COMMAND, tickOffset, 0, 0, 0, 0f, 0f, trimmed, safe);
     }
 
     private static void validateFinite(double value, String name) {
@@ -160,6 +191,22 @@ public final class RecordedAction {
         return command;
     }
 
+    /**
+     * 状态快照，永不为 {@code null}。
+     *
+     * <p>为空表示「没采集到红石方块」或「该动作不需要检测」，
+     * 回放时按默认行为处理（直接执行）。
+     */
+    @NotNull
+    public List<BlockSnapshot> snapshots() {
+        return snapshots;
+    }
+
+    /** 是否有可用于对比的快照。 */
+    public boolean hasSnapshots() {
+        return !snapshots.isEmpty();
+    }
+
     /** 人类可读摘要，用于列表展示与日志。命令内容不脱敏（任务本身不是机密）。 */
     @NotNull
     public String describe() {
@@ -187,7 +234,12 @@ public final class RecordedAction {
                 obj.addProperty("yaw", yaw);
                 obj.addProperty("pitch", pitch);
             }
-            case COMMAND -> obj.addProperty("command", command);
+            case COMMAND -> {
+                obj.addProperty("command", command);
+                if (!snapshots.isEmpty()) {
+                    obj.add("snapshots", BlockSnapshot.toJsonArray(snapshots));
+                }
+            }
             // 语句形式的 switch 必须留 default：若将来枚举新增值，
             // 没有 default 会静默写出一个不含任何数据字段的 JSON，
             // 反序列化时变成"类型对但值为 0"的脏动作。显式抛错优于静默。
@@ -223,7 +275,11 @@ public final class RecordedAction {
                         JsonUtil.path(obj, "pitch") != null ? JsonUtil.path(obj, "pitch").getAsFloat() : 0f);
                 case COMMAND -> {
                     String cmd = JsonUtil.stringOr(obj, "", "command");
-                    yield cmd.isEmpty() ? null : RecordedAction.command(tick, cmd);
+                    if (cmd.isEmpty()) {
+                        yield null;
+                    }
+                    yield RecordedAction.command(tick, cmd,
+                            BlockSnapshot.fromJsonArray(JsonUtil.path(obj, "snapshots")));
                 }
             };
         } catch (IllegalArgumentException | UnsupportedOperationException e) {
@@ -265,12 +321,13 @@ public final class RecordedAction {
                 && Double.compare(z, other.z) == 0
                 && Float.compare(yaw, other.yaw) == 0
                 && Float.compare(pitch, other.pitch) == 0
-                && Objects.equals(command, other.command);
+                && Objects.equals(command, other.command)
+                && snapshots.equals(other.snapshots);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(type, tickOffset, x, y, z, yaw, pitch, command);
+        return Objects.hash(type, tickOffset, x, y, z, yaw, pitch, command, snapshots);
     }
 
     @Override

@@ -76,6 +76,18 @@ public final class TaskRunner {
      */
     @Nullable
     public Long start(@Nullable RecordedTask task, @Nullable String fakeName, long startTick) {
+        return start(task, fakeName, startTick, false);
+    }
+
+    /**
+     * 启动一个回放。
+     *
+     * @param force 为 true 时<b>跳过方块状态检测</b>，无条件执行所有命令。
+     *              用于玩家确认「状态记录不准，但我就是要执行」的场景。
+     */
+    @Nullable
+    public Long start(@Nullable RecordedTask task, @Nullable String fakeName,
+                      long startTick, boolean force) {
         if (task == null) {
             return null;
         }
@@ -86,7 +98,7 @@ public final class TaskRunner {
             return null;
         }
         long id = nextId.getAndIncrement();
-        playbacks.put(id, new Playback(id, task, normalizeFakeName(fakeName), startTick));
+        playbacks.put(id, new Playback(id, task, normalizeFakeName(fakeName), startTick, force));
         return id;
     }
 
@@ -109,7 +121,8 @@ public final class TaskRunner {
      * @return 本刻产生的反馈文本（执行失败原因等）；无内容时返回空列表
      */
     @NotNull
-    public List<String> tick(long currentTick, @Nullable CommandSink sink) {
+    public List<String> tick(long currentTick, @Nullable CommandSink sink,
+                             @Nullable BlockProbe probe) {
         List<String> messages = new ArrayList<>();
         if (playbacks.isEmpty()) {
             return messages;
@@ -126,7 +139,7 @@ public final class TaskRunner {
                 continue;
             }
             try {
-                playback.step(currentTick, sink, messages);
+                playback.step(currentTick, sink, probe, messages);
             } catch (RuntimeException e) {
                 // 单个回放出错不能影响其他回放，更不能打断游戏刻
                 messages.add("§c回放 " + playback.id + " 异常: " + e.getMessage());
@@ -189,13 +202,19 @@ public final class TaskRunner {
         @Nullable
         private final String fakeName;
         private final long startTick;
+        /** 是否跳过状态检测强制执行。 */
+        private final boolean force;
         private int cursor;
+        /** 本回放发送过"检测中"提示，避免每个动作都刷屏。 */
+        private boolean probeNotified;
 
-        Playback(long id, @NotNull RecordedTask task, @Nullable String fakeName, long startTick) {
+        Playback(long id, @NotNull RecordedTask task, @Nullable String fakeName,
+                 long startTick, boolean force) {
             this.id = id;
             this.task = task;
             this.fakeName = fakeName;
             this.startTick = startTick;
+            this.force = force;
         }
 
         boolean isDone() {
@@ -208,7 +227,8 @@ public final class TaskRunner {
          * <p><b>批量执行</b>：把到期的动作一次做完，而不是每刻只做一个。
          * 否则当录制时某一刻有多个动作时，回放会被拉长。
          */
-        void step(long currentTick, @NotNull CommandSink sink, @NotNull List<String> messages) {
+        void step(long currentTick, @NotNull CommandSink sink, @Nullable BlockProbe probe,
+                  @NotNull List<String> messages) {
             if (isDone()) {
                 return;
             }
@@ -223,13 +243,13 @@ public final class TaskRunner {
                 if (action.tickOffset() > elapsed) {
                     break; // 还没到时间
                 }
-                execute(action, sink, messages);
+                execute(action, sink, probe, messages);
                 cursor++;
             }
         }
 
         private void execute(@NotNull RecordedAction action, @NotNull CommandSink sink,
-                             @NotNull List<String> messages) {
+                             @Nullable BlockProbe probe, @NotNull List<String> messages) {
             switch (action.type()) {
                 case MOVE -> {
                     String cmd = fakeName == null
@@ -258,9 +278,94 @@ public final class TaskRunner {
                                 + PermissionGuard.rootOf(raw) + "：" + reason);
                         return;
                     }
+                    // 方块状态检测：判断这活儿是不是已经干过了
+                    if (!shouldExecuteByState(action, probe, messages)) {
+                        return;
+                    }
                     dispatch(raw, "命令", sink, messages);
                 }
             }
+        }
+
+        /**
+         * 根据方块状态判断这条命令是否应该执行。
+         *
+         * <p><b>判定逻辑</b>：快照记录的是「执行命令前现场长什么样」。
+         * <ul>
+         *   <li>当前状态与快照<b>一致</b> → 这活儿还没干过，<b>执行</b></li>
+         *   <li>不一致 → 现场已经变了（多半是已经执行过，或被手动改过），<b>跳过</b></li>
+         * </ul>
+         * 这样就能避免「机器已经关了，再说关闭，结果又按一次按钮把它打开」。
+         *
+         * <p><b>降级</b>：没快照 / 探测器不可用 / force 模式 → 一律返回 true（照常执行）。
+         * 检测是增强，不能因为检测失败就让功能不可用。
+         *
+         * @return 应该执行返回 {@code true}；应跳过返回 {@code false}
+         */
+        private boolean shouldExecuteByState(@NotNull RecordedAction action,
+                                             @Nullable BlockProbe probe,
+                                             @NotNull List<String> messages) {
+            // 没有快照就没法判断，按原行为执行
+            if (!action.hasSnapshots()) {
+                return true;
+            }
+            // force 模式：玩家明确要求无条件执行
+            if (force) {
+                if (!probeNotified) {
+                    probeNotified = true;
+                    messages.add("§6任务「" + task.name() + "」为强制执行，已跳过状态检测");
+                }
+                return true;
+            }
+            if (probe == null || !probe.isAvailable()) {
+                return true;
+            }
+
+            java.util.List<BlockSnapshot> templates = action.snapshots();
+            java.util.List<BlockSnapshot> current;
+            try {
+                // 用绝对坐标定位：机器在世界里的位置是固定的，不随执行者移动
+                current = probe.recollect(templates, 0, 0, 0, false);
+            } catch (RuntimeException e) {
+                return true; // 读取异常不阻断，按原行为执行
+            }
+
+            int total = templates.size();
+            if (total == 0 || current.size() != total) {
+                return true;
+            }
+            int same = 0;
+            BlockSnapshot firstDiff = null;
+            for (int i = 0; i < total; i++) {
+                if (templates.get(i).matches(current.get(i))) {
+                    same++;
+                } else if (firstDiff == null) {
+                    firstDiff = templates.get(i);
+                }
+            }
+
+            if (same == total) {
+                // 状态一致，确认需要执行
+                if (!probeNotified) {
+                    probeNotified = true;
+                    messages.add("§7[状态检测] 现场与录制时一致（" + total + " 处），执行中...");
+                }
+                return true;
+            }
+
+            // 有差异 → 现场已变，跳过以免反向操作
+            String raw = action.command();
+            String brief = raw == null ? "" : raw;
+            if (brief.length() > 24) {
+                brief = brief.substring(0, 24) + "...";
+            }
+            messages.add("§6[状态检测] 跳过 /" + brief + "：现场与录制时不同"
+                    + "（" + same + "/" + total + " 处一致）");
+            if (firstDiff != null) {
+                messages.add("§8  差异示例：" + firstDiff.describe());
+            }
+            messages.add("§8  若确认要执行，用 §f/carpet ai run " + task.name() + " force");
+            return false;
         }
 
         /**

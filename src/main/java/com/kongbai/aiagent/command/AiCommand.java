@@ -187,16 +187,28 @@ public final class AiCommand {
         return Commands.literal("run")
                 .then(Commands.argument("name", StringArgumentType.word())
                         .executes(ctx -> runTask(ctx.getSource(),
-                                StringArgumentType.getString(ctx, "name"), null))
+                                StringArgumentType.getString(ctx, "name"), null, false))
+                        .then(Commands.literal("force")
+                                .executes(ctx -> runTask(ctx.getSource(),
+                                        StringArgumentType.getString(ctx, "name"), null, true)))
                         .then(Commands.argument("fake", StringArgumentType.word())
                                 .executes(ctx -> runTask(ctx.getSource(),
                                         StringArgumentType.getString(ctx, "name"),
-                                        StringArgumentType.getString(ctx, "fake")))))
+                                        StringArgumentType.getString(ctx, "fake"), false))
+                                .then(Commands.literal("force")
+                                        .executes(ctx -> runTask(ctx.getSource(),
+                                                StringArgumentType.getString(ctx, "name"),
+                                                StringArgumentType.getString(ctx, "fake"), true)))))
                 .then(Commands.literal("all")
-                        .executes(ctx -> runAll(ctx.getSource(), null))
+                        .executes(ctx -> runAll(ctx.getSource(), null, false))
+                        .then(Commands.literal("force")
+                                .executes(ctx -> runAll(ctx.getSource(), null, true)))
                         .then(Commands.argument("fake", StringArgumentType.word())
                                 .executes(ctx -> runAll(ctx.getSource(),
-                                        StringArgumentType.getString(ctx, "fake")))))
+                                        StringArgumentType.getString(ctx, "fake"), false))
+                                .then(Commands.literal("force")
+                                        .executes(ctx -> runAll(ctx.getSource(),
+                                                StringArgumentType.getString(ctx, "fake"), true)))))
                 .then(Commands.literal("stop")
                         .executes(ctx -> runStop(ctx.getSource())))
                 .then(Commands.literal("list")
@@ -292,10 +304,10 @@ public final class AiCommand {
     private static LiteralArgumentBuilder<CommandSourceStack> buildEndNode() {
         return Commands.literal("end")
                 .then(Commands.literal("confirm")
-                        .executes(ctx -> runAll(ctx.getSource(), null))
+                        .executes(ctx -> runAll(ctx.getSource(), null, false))
                         .then(Commands.argument("fake", StringArgumentType.word())
                                 .executes(ctx -> runAll(ctx.getSource(),
-                                        StringArgumentType.getString(ctx, "fake")))))
+                                        StringArgumentType.getString(ctx, "fake"), false))))
                 .then(Commands.literal("cancel")
                         .executes(ctx -> runStop(ctx.getSource())));
     }
@@ -320,7 +332,8 @@ public final class AiCommand {
         send(source, "§7/carpet ai task info <任务名> §f查看任务详情");
         send(source, "§7/carpet ai task remove <任务名> §f删除任务");
         send(source, "§8— 回放 —");
-        send(source, "§7/carpet ai run <任务名> [假人名] §f回放任务");
+        send(source, "§7/carpet ai run <任务名> [假人名] [force] §f回放任务");
+        send(source, "§8  force = 跳过状态检测强制执行");
         send(source, "§7/carpet ai run all [假人名] §f回放所有任务");
         send(source, "§7/carpet ai run list §f查看进行中的回放");
         send(source, "§7/carpet ai run stop §f停止所有回放");
@@ -501,6 +514,8 @@ public final class AiCommand {
         }
         send(source, "§a开始录制任务「" + name + "」");
         send(source, "§7会记录：移动、视角、你执行的命令（本模组命令除外）");
+        send(source, "§7执行命令时会同时记录周围方块的红石状态");
+        send(source, "§7回放时若状态与录制时不符，会自动跳过该命令（防止反向操作）");
         if (TaskRegistry.getInstance().exists(name)) {
             send(source, "§6注意：同名任务已存在，结束录制时会被覆盖");
         }
@@ -531,7 +546,14 @@ public final class AiCommand {
         }
         send(source, "§a已" + (existed ? "覆盖" : "保存") + "任务「" + task.name() + "」："
                 + task.size() + " 个动作，约 " + String.format("%.1f", task.durationTicks() / 20.0) + " 秒");
-        send(source, "§7回放：§f/carpet ai run " + task.name() + " [假人名]");
+        int checked = task.snapshotActionCount();
+        if (checked > 0) {
+            send(source, "§7其中 " + checked + " 个动作带状态检测（回放时会自动核对现场）");
+        } else {
+            send(source, "§6没有记录到红石状态 —— 可能录制时附近没有可检测的方块");
+            send(source, "§6回放时不会做状态核对，请确保机器旁边有按钮/拉杆/红石元件");
+        }
+        send(source, "§7回放：§f/carpet ai run " + task.name() + " [假人名] [force]");
         return 1;
     }
 
@@ -599,7 +621,8 @@ public final class AiCommand {
         send(source, "§6任务「" + task.name() + "」");
         send(source, "§7创建者: §f" + (task.ownerName().isEmpty() ? task.ownerUuid().toString() : task.ownerName()));
         send(source, "§7权限等级: §f" + task.permLevel() + " §8（回放命令以此等级执行）");
-        send(source, "§7动作数: §f" + task.size());
+        send(source, "§7动作数: §f" + task.size()
+                + "（其中 " + task.snapshotActionCount() + " 个带状态检测）");
         send(source, "§7时长: §f" + String.format("%.1f", task.durationTicks() / 20.0) + " 秒");
         int shown = Math.min(task.size(), 8);
         send(source, "§7前 " + shown + " 个动作:");
@@ -633,7 +656,8 @@ public final class AiCommand {
 
     // ---------- 回放 ----------
 
-    private static int runTask(@NotNull CommandSourceStack source, String rawName, String fakeName) {
+    private static int runTask(@NotNull CommandSourceStack source, String rawName,
+                               String fakeName, boolean force) {
         TaskRegistry registry = TaskRegistry.getInstance();
         if (!registry.isAttached()) {
             sendError(source, "任务系统尚未就绪（世界未加载）");
@@ -645,20 +669,26 @@ public final class AiCommand {
             return 0;
         }
         long tick = currentTick(source);
-        Long id = TaskRunner.getInstance().start(task, fakeName, tick);
+        Long id = TaskRunner.getInstance().start(task, fakeName, tick, force);
         if (id == null) {
             sendError(source, "无法启动回放：可能任务为空，或回放数量已达上限 "
                     + TaskRunner.MAX_CONCURRENT);
             return 0;
         }
         send(source, "§a开始回放任务「" + task.name() + "」"
-                + (fakeName == null || fakeName.isBlank() ? "" : " → 假人 " + fakeName));
+                + (fakeName == null || fakeName.isBlank() ? "" : " → 假人 " + fakeName)
+                + (force ? " §6[强制]" : ""));
         send(source, "§7共 " + task.size() + " 个动作，预计 "
                 + String.format("%.1f", task.durationTicks() / 20.0) + " 秒");
+        if (force) {
+            send(source, "§6强制执行：已跳过方块状态检测，所有命令都会执行");
+        } else if (task.hasStateCheck()) {
+            send(source, "§7正在检测机器状态，请稍候...（状态不符的命令会自动跳过）");
+        }
         return 1;
     }
 
-    private static int runAll(@NotNull CommandSourceStack source, String fakeName) {
+    private static int runAll(@NotNull CommandSourceStack source, String fakeName, boolean force) {
         TaskRegistry registry = TaskRegistry.getInstance();
         if (!registry.isAttached()) {
             sendError(source, "任务系统尚未就绪（世界未加载）");
@@ -676,7 +706,7 @@ public final class AiCommand {
             if (task == null || task.isEmpty()) {
                 continue;
             }
-            if (runner.start(task, fakeName, tick) != null) {
+            if (runner.start(task, fakeName, tick, force) != null) {
                 started++;
             } else {
                 failed++;
@@ -882,7 +912,7 @@ public final class AiCommand {
             sendError(source, "关联的任务已不存在: " + taskName);
             return 0;
         }
-        Long id = TaskRunner.getInstance().start(task, null, currentTick(source));
+        Long id = TaskRunner.getInstance().start(task, null, currentTick(source), false);
         if (id == null) {
             sendError(source, "启动失败：任务为空或回放已达上限");
             return 0;
@@ -975,7 +1005,7 @@ public final class AiCommand {
             if (task == null || task.isEmpty()) {
                 continue;
             }
-            if (runner.start(task, null, tick) != null) {
+            if (runner.start(task, null, tick, false) != null) {
                 started++;
                 if (machine.state() == MachineState.UNKNOWN) {
                     unknownNames.add(machine.name());
@@ -1019,7 +1049,7 @@ public final class AiCommand {
                 if (task == null || task.isEmpty()) {
                     continue;
                 }
-                if (runner.start(task, null, tick) != null) {
+                if (runner.start(task, null, tick, false) != null) {
                     machines++;
                     registry.put(machine.withState(MachineState.OFF));
                 }
@@ -1058,7 +1088,7 @@ public final class AiCommand {
             if (task == null || task.isEmpty()) {
                 continue;
             }
-            if (runner.start(task, null, tick) != null) {
+            if (runner.start(task, null, tick, false) != null) {
                 started++;
                 registry.put(machine.withState(MachineState.ON));
             }

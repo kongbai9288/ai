@@ -6,6 +6,7 @@ import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -37,6 +38,8 @@ public final class TaskRecorder {
     public static final double MOVE_THRESHOLD = 0.15;
     /** 视角采样阈值（度）。 */
     public static final float LOOK_THRESHOLD = 2.0f;
+    /** 采集方块状态时使用的半径（格）。 */
+    public static final int PROBE_RADIUS = BlockProbe.DEFAULT_RADIUS;
     /** 是否允许阈值平方比较，避免开方。位置比较用平方距离。 */
     private static final double MOVE_THRESHOLD_SQ = MOVE_THRESHOLD * MOVE_THRESHOLD;
 
@@ -121,15 +124,25 @@ public final class TaskRecorder {
     }
 
     /**
-     * 记录一条玩家执行的命令。
+     * 记录一条玩家执行的命令，并采集执行前的方块状态快照。
      *
      * <p><b>会过滤掉本模组的录制命令</b>（见 {@link #shouldIgnoreCommand}），
      * 否则玩家用 {@code /carpet ai rec stop} 结束录制时，这条命令会被录进去，
      * 回放时又触发一次录制停止 —— 形成自指循环。
      *
+     * <p><b>为什么在「执行前」采集快照</b>：
+     * 快照的语义是「该执行命令时，现场应该是什么样」。
+     * 记下执行前的状态，回放时若当前状态与之<b>一致</b>，
+     * 说明这活儿还没干过，需要执行；
+     * 若<b>不一致</b>（比如机器已经关了），说明已经干过了，应该跳过。
+     * 这正是避免「说关闭反而打开」的关键。
+     *
+     * @param tick  当前游戏刻
+     * @param rawCommand 命令原文
+     * @param probe 方块采集器；为 {@code null} 时不采集快照（功能降级，动作照常记录）
      * @return 已记录返回 {@code true}；被过滤/会话已满/命令非法返回 {@code false}
      */
-    public boolean recordCommand(long tick, @Nullable String rawCommand) {
+    public boolean recordCommand(long tick, @Nullable String rawCommand, @Nullable BlockProbe probe) {
         if (finished || rawCommand == null) {
             return false;
         }
@@ -141,12 +154,26 @@ public final class TaskRecorder {
             return false;
         }
         long offset = Math.max(0, tick - startTick);
+        // 采集执行命令前周围方块的状态
+        List<BlockSnapshot> snapshots = List.of();
+        if (probe != null && probe.isAvailable() && hasSample) {
+            try {
+                snapshots = probe.collect(lastX, lastY, lastZ, PROBE_RADIUS);
+            } catch (RuntimeException e) {
+                snapshots = List.of(); // 采集失败不阻断录制
+            }
+        }
         try {
-            actions.add(RecordedAction.command(offset, command));
+            actions.add(RecordedAction.command(offset, command, snapshots));
             return true;
         } catch (IllegalArgumentException e) {
             return false;
         }
+    }
+
+    /** 兼容旧调用：不采集快照。 */
+    public boolean recordCommand(long tick, @Nullable String rawCommand) {
+        return recordCommand(tick, rawCommand, null);
     }
 
     /**

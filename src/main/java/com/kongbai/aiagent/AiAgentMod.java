@@ -6,7 +6,9 @@ import com.kongbai.aiagent.command.AiCommand;
 import com.kongbai.aiagent.config.ProfileManager;
 import com.kongbai.aiagent.ai.AgentService;
 import com.kongbai.aiagent.machine.MachineRegistry;
+import com.kongbai.aiagent.task.BlockProbe;
 import com.kongbai.aiagent.task.CommandSink;
+import com.kongbai.aiagent.task.LevelBlockProbe;
 import com.kongbai.aiagent.task.RecordedTask;
 import com.kongbai.aiagent.task.RecorderManager;
 import com.kongbai.aiagent.task.Scheduler;
@@ -19,6 +21,7 @@ import net.minecraft.commands.CommandBuildContext;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.storage.LevelResource;
 import org.jetbrains.annotations.NotNull;
@@ -154,7 +157,7 @@ public class AiAgentMod implements ModInitializer {
                 sampleRecorders(server, recorders, tick);
             }
             if (runner.hasActive()) {
-                List<String> messages = runner.tick(tick, createSink(server));
+                List<String> messages = runner.tick(tick, createSink(server), createProbe(server));
                 broadcast(server, messages);
             }
             if (scheduler.hasActive()) {
@@ -255,6 +258,30 @@ public class AiAgentMod implements ModInitializer {
                     return false;
                 }
             };
+        }
+
+        /**
+         * 构造方块状态采集器。
+         *
+         * <p><b>每刻新建，用完即弃</b>：{@code LevelBlockProbe} 持有 {@code ServerLevel}，
+         * 若缓存下来会导致世界卸载后无法回收。每刻新建的开销只是一个对象分配，
+         * 相比内存泄漏的风险完全可以接受。
+         *
+         * <p><b>已知限制</b>：目前固定取主世界。若机器建在下界/末地，
+         * 检测会读到错误的维度从而判定为「不一致」而跳过。
+         * 由于跳过是安全方向（不会反向操作），这个限制可接受；
+         * 后续可在录制时记录维度 ID 来支持多维度。
+         *
+         * @return 采集器；无法确定世界时返回 {@code null}（调用方会跳过检测）
+         */
+        @Nullable
+        private BlockProbe createProbe(@NotNull MinecraftServer server) {
+            try {
+                ServerLevel level = server.overworld();
+                return level == null ? null : new LevelBlockProbe(level);
+            } catch (Throwable t) {
+                return null;
+            }
         }
 
         /** 广播回放产生的反馈（例如命令被拦截、任务完成）。 */
