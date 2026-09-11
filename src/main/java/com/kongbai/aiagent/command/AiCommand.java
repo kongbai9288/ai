@@ -2,6 +2,11 @@ package com.kongbai.aiagent.command;
 
 import com.kongbai.aiagent.config.AiProfile;
 import com.kongbai.aiagent.config.ProfileManager;
+import com.kongbai.aiagent.task.RecordedTask;
+import com.kongbai.aiagent.task.RecorderManager;
+import com.kongbai.aiagent.task.TaskRecorder;
+import com.kongbai.aiagent.task.TaskRegistry;
+import com.kongbai.aiagent.task.TaskRunner;
 import com.kongbai.aiagent.util.PermissionGuard;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.FloatArgumentType;
@@ -63,6 +68,9 @@ public final class AiCommand {
                 .requires(source -> source.hasPermission(0))
                 .executes(ctx -> showHelp(ctx.getSource()))
                 .then(buildApiNode())
+                .then(buildRecNode())
+                .then(buildTaskNode())
+                .then(buildRunNode())
                 .then(Commands.literal("perm")
                         .executes(ctx -> showPermissions(ctx.getSource())));
 
@@ -115,15 +123,99 @@ public final class AiCommand {
                         .executes(ctx -> listProfiles(ctx.getSource())));
     }
 
+    // ---------- 命令树：录制 / 任务 / 回放 ----------
+
+    /**
+     * {@code /carpet ai rec ...} 录制控制。
+     *
+     * <p>录制期间会记录玩家的位置、视角与执行的命令。
+     * 本模组自己的 {@code /carpet ai ...} 命令会被自动排除（见 {@code TaskRecorder}），
+     * 否则"结束录制"这条命令会被录进任务，回放时又触发一次结束 —— 自指循环。
+     */
+    @NotNull
+    private static LiteralArgumentBuilder<CommandSourceStack> buildRecNode() {
+        return Commands.literal("rec")
+                .executes(ctx -> recStatus(ctx.getSource()))
+                .then(Commands.argument("name", StringArgumentType.word())
+                        .executes(ctx -> recStart(ctx.getSource(),
+                                StringArgumentType.getString(ctx, "name"))))
+                .then(Commands.literal("stop")
+                        .executes(ctx -> recStop(ctx.getSource())))
+                .then(Commands.literal("cancel")
+                        .executes(ctx -> recCancel(ctx.getSource())))
+                .then(Commands.literal("status")
+                        .executes(ctx -> recStatus(ctx.getSource())));
+    }
+
+    /** {@code /carpet ai task ...} 任务管理。 */
+    @NotNull
+    private static LiteralArgumentBuilder<CommandSourceStack> buildTaskNode() {
+        return Commands.literal("task")
+                .executes(ctx -> taskList(ctx.getSource()))
+                .then(Commands.literal("list")
+                        .executes(ctx -> taskList(ctx.getSource())))
+                .then(Commands.literal("info")
+                        .then(Commands.argument("name", StringArgumentType.word())
+                                .executes(ctx -> taskInfo(ctx.getSource(),
+                                        StringArgumentType.getString(ctx, "name")))))
+                .then(Commands.literal("remove")
+                        .then(Commands.argument("name", StringArgumentType.word())
+                                .executes(ctx -> taskRemove(ctx.getSource(),
+                                        StringArgumentType.getString(ctx, "name")))));
+    }
+
+    /**
+     * {@code /carpet ai run ...} 回放。
+     *
+     * <p>{@code run all} 对应需求里的"执行所有任务"：
+     * 依次启动所有已保存任务，互不等待（各自按自己的时间轴推进）。
+     */
+    @NotNull
+    private static LiteralArgumentBuilder<CommandSourceStack> buildRunNode() {
+        return Commands.literal("run")
+                .then(Commands.argument("name", StringArgumentType.word())
+                        .executes(ctx -> runTask(ctx.getSource(),
+                                StringArgumentType.getString(ctx, "name"), null))
+                        .then(Commands.argument("fake", StringArgumentType.word())
+                                .executes(ctx -> runTask(ctx.getSource(),
+                                        StringArgumentType.getString(ctx, "name"),
+                                        StringArgumentType.getString(ctx, "fake")))))
+                .then(Commands.literal("all")
+                        .executes(ctx -> runAll(ctx.getSource(), null))
+                        .then(Commands.argument("fake", StringArgumentType.word())
+                                .executes(ctx -> runAll(ctx.getSource(),
+                                        StringArgumentType.getString(ctx, "fake")))))
+                .then(Commands.literal("stop")
+                        .executes(ctx -> runStop(ctx.getSource())))
+                .then(Commands.literal("list")
+                        .executes(ctx -> runList(ctx.getSource())));
+    }
+
     // ---------- 具体实现 ----------
 
     private static int showHelp(@NotNull CommandSourceStack source) {
         send(source, "§6=== 假人智能 AI Agent ===");
+        send(source, "§8— AI 配置 —");
         send(source, "§7/carpet ai api §f查看我的 AI 配置");
         send(source, "§7/carpet ai api set <地址> <模型> [密钥] §f配置 AI 接口");
         send(source, "§7/carpet ai api timeout <毫秒> §f设置超时");
         send(source, "§7/carpet ai api temp <0-2> §f设置温度");
         send(source, "§7/carpet ai api clear §f清除我的配置");
+        send(source, "§8— 任务录制 —");
+        send(source, "§7/carpet ai rec <任务名> §f开始录制（记录移动/视角/命令）");
+        send(source, "§7/carpet ai rec stop §f结束并保存");
+        send(source, "§7/carpet ai rec cancel §f放弃录制");
+        send(source, "§7/carpet ai rec status §f查看录制状态");
+        send(source, "§8— 任务管理 —");
+        send(source, "§7/carpet ai task list §f列出所有任务");
+        send(source, "§7/carpet ai task info <任务名> §f查看任务详情");
+        send(source, "§7/carpet ai task remove <任务名> §f删除任务");
+        send(source, "§8— 回放 —");
+        send(source, "§7/carpet ai run <任务名> [假人名] §f回放任务");
+        send(source, "§7/carpet ai run all [假人名] §f回放所有任务");
+        send(source, "§7/carpet ai run list §f查看进行中的回放");
+        send(source, "§7/carpet ai run stop §f停止所有回放");
+        send(source, "§8— 其他 —");
         send(source, "§7/carpet ai perm §f查看 AI 可执行命令范围");
         return 1;
     }
@@ -257,6 +349,263 @@ public final class AiCommand {
             send(source, "§7- §f" + label + " §8| §7" + profile.model() + " §8| §7" + profile.baseUrl());
         }
         return 1;
+    }
+
+    // ---------- 录制 ----------
+
+    private static int recStart(@NotNull CommandSourceStack source, String rawName) {
+        UUID uuid = playerUuid(source);
+        if (uuid == null) {
+            sendError(source, "该命令只能由玩家执行");
+            return 0;
+        }
+        String name = rawName == null ? "" : rawName.trim();
+        if (!RecordedTask.isValidName(name)) {
+            sendError(source, "任务名非法：只能包含中文/字母/数字/下划线/连字符，且不超过 "
+                    + RecordedTask.MAX_NAME_LENGTH + " 个字符");
+            return 0;
+        }
+        RecorderManager recorders = RecorderManager.getInstance();
+        if (recorders.isRecording(uuid)) {
+            sendError(source, "你正在录制中，请先 /carpet ai rec stop 或 cancel");
+            return 0;
+        }
+        long tick = currentTick(source);
+        TaskRecorder recorder = recorders.start(uuid, playerName(source),
+                PermissionGuard.levelOf(source), name, tick);
+        if (recorder == null) {
+            sendError(source, "无法开始录制（可能已有进行中的会话）");
+            return 0;
+        }
+        send(source, "§a开始录制任务「" + name + "」");
+        send(source, "§7会记录：移动、视角、你执行的命令（本模组命令除外）");
+        if (TaskRegistry.getInstance().exists(name)) {
+            send(source, "§6注意：同名任务已存在，结束录制时会被覆盖");
+        }
+        send(source, "§7结束录制：§f/carpet ai rec stop");
+        return 1;
+    }
+
+    private static int recStop(@NotNull CommandSourceStack source) {
+        UUID uuid = playerUuid(source);
+        if (uuid == null) {
+            sendError(source, "该命令只能由玩家执行");
+            return 0;
+        }
+        RecordedTask task = RecorderManager.getInstance().stop(uuid);
+        if (task == null) {
+            sendError(source, "你没有进行中的录制，或录制内容为空");
+            return 0;
+        }
+        TaskRegistry registry = TaskRegistry.getInstance();
+        if (!registry.isAttached()) {
+            sendError(source, "任务系统尚未就绪，保存失败");
+            return 0;
+        }
+        boolean existed = registry.exists(task.name());
+        if (!registry.put(task)) {
+            sendError(source, "保存失败，请查看服务端日志");
+            return 0;
+        }
+        send(source, "§a已" + (existed ? "覆盖" : "保存") + "任务「" + task.name() + "」："
+                + task.size() + " 个动作，约 " + String.format("%.1f", task.durationTicks() / 20.0) + " 秒");
+        send(source, "§7回放：§f/carpet ai run " + task.name() + " [假人名]");
+        return 1;
+    }
+
+    private static int recCancel(@NotNull CommandSourceStack source) {
+        UUID uuid = playerUuid(source);
+        if (uuid == null) {
+            sendError(source, "该命令只能由玩家执行");
+            return 0;
+        }
+        if (RecorderManager.getInstance().cancel(uuid)) {
+            send(source, "§a已取消录制（内容已丢弃）");
+            return 1;
+        }
+        send(source, "§7你没有进行中的录制");
+        return 1;
+    }
+
+    private static int recStatus(@NotNull CommandSourceStack source) {
+        UUID uuid = playerUuid(source);
+        if (uuid == null) {
+            sendError(source, "该命令只能由玩家执行");
+            return 0;
+        }
+        TaskRecorder recorder = RecorderManager.getInstance().get(uuid);
+        if (recorder == null) {
+            send(source, "§7当前没有进行中的录制");
+            send(source, "§7开始录制：§f/carpet ai rec <任务名>");
+            return 1;
+        }
+        send(source, "§6正在录制「" + recorder.taskName() + "」");
+        send(source, "§7已记录 §f" + recorder.size() + " §7个动作（上限 " + RecordedTask.MAX_ACTIONS + "）");
+        if (recorder.isFull()) {
+            send(source, "§c已达上限，将自动保存");
+        }
+        return 1;
+    }
+
+    // ---------- 任务管理 ----------
+
+    private static int taskList(@NotNull CommandSourceStack source) {
+        TaskRegistry registry = TaskRegistry.getInstance();
+        if (!registry.isAttached()) {
+            sendError(source, "任务系统尚未就绪（世界未加载）");
+            return 0;
+        }
+        if (registry.size() == 0) {
+            send(source, "§7还没有任何任务。用 §f/carpet ai rec <任务名> §7录制一个");
+            return 1;
+        }
+        send(source, "§6任务列表（共 " + registry.size() + "）");
+        for (RecordedTask task : registry.all()) {
+            send(source, String.format("§7- §f%-16s §8| %3d 动作 §8| §7%.1fs §8| §7%s",
+                    task.name(), task.size(), task.durationTicks() / 20.0,
+                    task.ownerName().isEmpty() ? "未知创建者" : task.ownerName()));
+        }
+        return 1;
+    }
+
+    private static int taskInfo(@NotNull CommandSourceStack source, String rawName) {
+        RecordedTask task = TaskRegistry.getInstance().get(rawName);
+        if (task == null) {
+            sendError(source, "任务不存在: " + rawName);
+            return 0;
+        }
+        send(source, "§6任务「" + task.name() + "」");
+        send(source, "§7创建者: §f" + (task.ownerName().isEmpty() ? task.ownerUuid().toString() : task.ownerName()));
+        send(source, "§7权限等级: §f" + task.permLevel() + " §8（回放命令以此等级执行）");
+        send(source, "§7动作数: §f" + task.size());
+        send(source, "§7时长: §f" + String.format("%.1f", task.durationTicks() / 20.0) + " 秒");
+        int shown = Math.min(task.size(), 8);
+        send(source, "§7前 " + shown + " 个动作:");
+        for (int i = 0; i < shown; i++) {
+            send(source, "§8  " + task.actions().get(i).describe());
+        }
+        if (task.size() > shown) {
+            send(source, "§8  ... 还有 " + (task.size() - shown) + " 个");
+        }
+        return 1;
+    }
+
+    private static int taskRemove(@NotNull CommandSourceStack source, String rawName) {
+        RecordedTask task = TaskRegistry.getInstance().get(rawName);
+        if (task == null) {
+            sendError(source, "任务不存在: " + rawName);
+            return 0;
+        }
+        // 只允许创建者本人或权限等级更高者删除
+        UUID uuid = playerUuid(source);
+        boolean isOwner = uuid != null && uuid.equals(task.ownerUuid());
+        boolean isAdmin = PermissionGuard.levelOf(source) > task.permLevel();
+        if (!isOwner && !isAdmin) {
+            sendError(source, "只有任务创建者本人可以删除该任务");
+            return 0;
+        }
+        TaskRegistry.getInstance().remove(rawName);
+        send(source, "§a已删除任务「" + task.name() + "」");
+        return 1;
+    }
+
+    // ---------- 回放 ----------
+
+    private static int runTask(@NotNull CommandSourceStack source, String rawName, String fakeName) {
+        TaskRegistry registry = TaskRegistry.getInstance();
+        if (!registry.isAttached()) {
+            sendError(source, "任务系统尚未就绪（世界未加载）");
+            return 0;
+        }
+        RecordedTask task = registry.get(rawName);
+        if (task == null) {
+            sendError(source, "任务不存在: " + rawName);
+            return 0;
+        }
+        long tick = currentTick(source);
+        Long id = TaskRunner.getInstance().start(task, fakeName, tick);
+        if (id == null) {
+            sendError(source, "无法启动回放：可能任务为空，或回放数量已达上限 "
+                    + TaskRunner.MAX_CONCURRENT);
+            return 0;
+        }
+        send(source, "§a开始回放任务「" + task.name() + "」"
+                + (fakeName == null || fakeName.isBlank() ? "" : " → 假人 " + fakeName));
+        send(source, "§7共 " + task.size() + " 个动作，预计 "
+                + String.format("%.1f", task.durationTicks() / 20.0) + " 秒");
+        return 1;
+    }
+
+    private static int runAll(@NotNull CommandSourceStack source, String fakeName) {
+        TaskRegistry registry = TaskRegistry.getInstance();
+        if (!registry.isAttached()) {
+            sendError(source, "任务系统尚未就绪（世界未加载）");
+            return 0;
+        }
+        if (registry.size() == 0) {
+            send(source, "§7没有可回放的任务");
+            return 1;
+        }
+        long tick = currentTick(source);
+        TaskRunner runner = TaskRunner.getInstance();
+        int started = 0;
+        int failed = 0;
+        for (RecordedTask task : registry.all()) {
+            if (task == null || task.isEmpty()) {
+                continue;
+            }
+            if (runner.start(task, fakeName, tick) != null) {
+                started++;
+            } else {
+                failed++;
+            }
+        }
+        send(source, "§a已启动 " + started + " 个任务回放"
+                + (fakeName == null || fakeName.isBlank() ? "" : "（假人 " + fakeName + "）"));
+        if (failed > 0) {
+            send(source, "§6" + failed + " 个任务未能启动（可能已达并发上限 " + TaskRunner.MAX_CONCURRENT + "）");
+        }
+        return 1;
+    }
+
+    private static int runStop(@NotNull CommandSourceStack source) {
+        TaskRunner runner = TaskRunner.getInstance();
+        int count = runner.activeCount();
+        if (count == 0) {
+            send(source, "§7当前没有进行中的回放");
+            return 1;
+        }
+        runner.stopAll();
+        send(source, "§a已停止 " + count + " 个回放");
+        return 1;
+    }
+
+    private static int runList(@NotNull CommandSourceStack source) {
+        TaskRunner runner = TaskRunner.getInstance();
+        if (!runner.hasActive()) {
+            send(source, "§7当前没有进行中的回放");
+            return 1;
+        }
+        send(source, "§6进行中的回放（共 " + runner.activeCount() + "）");
+        for (String line : runner.activeNames()) {
+            send(source, "§7- §f" + line);
+        }
+        return 1;
+    }
+
+    /**
+     * 取当前游戏刻。
+     *
+     * <p>取不到时返回 0 —— 这会让回放"立刻执行所有动作"，
+     * 而不是崩溃。属于可接受的降级。
+     */
+    private static long currentTick(@NotNull CommandSourceStack source) {
+        try {
+            var server = source.getServer();
+            return server == null ? 0L : server.getTickCount();
+        } catch (Throwable t) {
+            return 0L;
+        }
     }
 
     private static int showPermissions(@NotNull CommandSourceStack source) {
