@@ -11,21 +11,15 @@ base {
 }
 
 repositories {
-    // Carpet 官方 Maven (必需)
+    // Carpet 官方 Maven（必需）
     maven { url 'https://masa.dy.fi/maven' }
     mavenCentral()
 }
 
 loom {
-    // 26.2 起 MC 已不再混淆，但仍保留拆分服务端数据源配置
-    splitEnvironmentSourceSets()
-
-    mods {
-        "ai-agent" {
-            sourceSet sourceSets.main
-            sourceSet sourceSets.client
-        }
-    }
+    // 本项目无客户端专属代码，不做环境拆分。
+    // 一旦启用 splitEnvironmentSourceSets，就必须存在 src/client 目录，
+    // 否则 Loom 会在配置阶段报错。
 }
 
 dependencies {
@@ -34,20 +28,17 @@ dependencies {
     modImplementation "net.fabricmc:fabric-loader:${loader_version}"
     modImplementation "net.fabricmc.fabric-api:fabric-api:${fabric_api_version}"
 
-    // Carpet 核心: 编译期依赖，运行时由玩家自行安装
+    // Carpet 核心：编译期依赖，运行时由玩家自行安装
     modCompileOnly "carpet:fabric-carpet:${minecraft_version}-${carpet_core_version}"
 
-    // GSON 由 Minecraft 自带，无需额外引入
+    // GSON 与 java.net.http.HttpClient 均由 Minecraft / JDK 自带，无需额外引入
 }
 
 processResources {
     inputs.property "version", project.version
-    inputs.property "minecraft_version", project.minecraft_version
-    inputs.property "loader_version", project.loader_version
 
     filesMatching("fabric.mod.json") {
         expand "version": project.version,
-                "minecraft_version": project.minecraft_version,
                 "loader_version": project.loader_version
     }
 }

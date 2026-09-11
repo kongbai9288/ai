@@ -7,6 +7,9 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -23,8 +26,6 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
-      # 本项目未内置 gradle-wrapper.jar，直接安装指定版本 Gradle。
-      # 版本与 Fabric 26.2 公告一致（Loom 1.17 + Gradle 9.5.1）。
       - name: Install Gradle 9.5.1
         run: |
           wget -q https://services.gradle.org/distributions/gradle-9.5.1-bin.zip
@@ -37,19 +38,48 @@ jobs:
           gradle --version | head -5
 
       - name: Build with Gradle
-        run: gradle build --no-daemon --stacktrace
+        id: gradle
+        continue-on-error: true
+        run: |
+          gradle build --no-daemon --stacktrace --console=plain 2>&1 | tee build-output.log
+          echo "exit=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      # 日志落盘到独立分支，便于在无法下载 Actions 日志时排查
+      - name: Publish build log to ci-logs branch
+        if: always()
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin ci-logs 2>/dev/null || true
+          git checkout -B ci-logs
+          mkdir -p logs
+          {
+            echo "# Build log"
+            echo ""
+            echo "- commit: \`${{ github.sha }}\`"
+            echo "- result: \`${{ steps.gradle.outputs.exit }}\`"
+            echo "- run: $RUN_URL"
+            echo ""
+            echo '```'
+            tail -c 60000 build-output.log
+            echo '```'
+          } > logs/latest.md
+          git add -A logs
+          git commit -m "ci: build log for ${GITHUB_SHA::7}" || echo "nothing to commit"
+          git push --force origin ci-logs
+
+      - name: Fail job if build failed
+        if: steps.gradle.outputs.exit != '0'
+        run: |
+          echo "构建失败，日志已写入 ci-logs 分支"
+          exit 1
 
       - name: Upload artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: ai-agent-${{ github.sha }}
           path: build/libs/*.jar
           if-no-files-found: error
-
-      - name: Upload on failure logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: build/reports/
-          if-no-files-found: ignore
