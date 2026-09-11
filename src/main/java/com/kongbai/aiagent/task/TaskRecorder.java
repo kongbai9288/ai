@@ -58,6 +58,9 @@ public final class TaskRecorder {
     private float lastYaw;
     private float lastPitch;
     private boolean hasSample;
+    /** 最近一次采样时的维度 ID，用于采集方块状态时定位正确的世界。 */
+    @NotNull
+    private String lastDimension = BlockSnapshot.DEFAULT_DIMENSION;
 
     private boolean finished;
 
