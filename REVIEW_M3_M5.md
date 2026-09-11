@@ -163,17 +163,33 @@ AI 回复属于**完全不可信输入**，四道防线：
 
 ## 七、已知风险与未决项
 
-### ⚠️ 编译仍未验证
+### ✅ 编译已通过
 
-沙盒 JDK 11，本项目需 Java 25。以下 API 假设待 CI 确认（M3–M5 新增部分）：
+`402e37b7` 起 CI 全绿（Build with Gradle / Upload artifact 均 success），
+jar 产物由 Actions 上传。沙盒 JDK 11 无法本地验证，全部靠 CI 迭代修正。
 
-1. `ServerboundChatPacket.message()`（26.1 javadoc 确认存在）
-2. `ServerGamePacketListenerImpl.handleChat`（mixin `require=0` 兜底）
-3. `ServerPlayer.createCommandSourceStack()`
-4. `MinecraftServer.getCommands().performPrefixedCommand(...)`
-5. `ServerPlayer.sendSystemMessage(Component)`
+**编译问题累计 3 轮、72 → 7 → 0 个错误**，全部源于 26.1 的 API 重构：
 
-其中 2 有降级保护；其余若编译失败，按编译器提示修正即可。
+| 变更 | 处理 |
+|---|---|
+| `carpet.api.CarpetExtension` | → `carpet.CarpetExtension`（包名错误） |
+| `hasPermission(int)` / `getPermissionLevel()` / `withPermission(int)` | 26.1 权限系统重构后全部移除 |
+| `MinecraftServer.getSavePath(LevelResource)` | 反射依次尝试 `getSavePath`/`getWorldPath`，失败则不持久化 |
+| `ServerPlayer.getServer()` | ChatMixin 改反射取 `MinecraftServer` 字段 |
+| `GameProfile.getName()` | → `source.getTextName()` |
+| `AiException extends Exception` | → `RuntimeException`（lambda 不能抛受检异常） |
+| `catch (IllegalArgumentException \| NumberFormatException)` | 子类不能与父类并列 |
+
+以下 API 假设已在 CI 中确认（M3–M5 新增部分）：
+
+1. `ServerboundChatPacket.message()` ✅
+2. `ServerGamePacketListenerImpl.handleChat` ✅（编译通过；`require=0` 保留运行时降级）
+3. `ServerPlayer.createCommandSourceStack()` ✅
+4. `MinecraftServer.getCommands().performPrefixedCommand(...)` ✅
+5. `ServerPlayer.sendSystemMessage(Component)` ✅
+6. `Commands.hasPermission(Commands.LEVEL_*)` ✅（26.1 新的权限探测方式）
+
+**注意**：编译通过 ≠ 运行正确。`handleChat` 需进游戏实测（见下条）。
 
 ### ⚠️ 聊天触发可能不生效
 
