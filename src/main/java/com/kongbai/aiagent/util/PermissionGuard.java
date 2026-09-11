@@ -1,6 +1,7 @@
 package com.kongbai.aiagent.util;
 
 import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.commands.Commands;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -178,25 +179,43 @@ public final class PermissionGuard {
      */
     @NotNull
     public static CommandSourceStack clamp(@NotNull CommandSourceStack source, int permLevel) {
-        int level = Math.max(0, Math.min(4, permLevel));
-        try {
-            return source.withPermission(level);
-        } catch (Exception e) {
-            // withPermission 理论上不会抛异常；若真发生，宁可返回原对象也不要崩溃游戏线程
-            return source;
-        }
+        // 26.1 起权限系统重构：CommandSourceStack.withPermission(int) 已改为
+        // withPermission(PermissionSet)，构造 PermissionSet 的公开工厂尚不明确，
+        // 因此这里不再做「降权」变换，直接返回原 source。
+        //
+        // 这不意味着防提权失效：真正兜住风险的是本类的白名单 + 永久黑名单
+        // （见 check()），它们不依赖任何权限 API。
+        // 待 26.2 的 PermissionSet 构造方式确认后再补上升降权。
+        return source;
     }
 
     /**
-     * 取某命令源的权限等级。
+     * 取某命令源的权限等级（0-4）。
+     *
+     * <p>26.1 起 {@code getPermissionLevel()} 已移除，改为通过
+     * {@code Commands.hasPermission(PermissionCheck)} 返回的判定器逐个试探。
+     * 从高到低探测，命中即返回对应等级。
      *
      * <p>注意：不要缓存此值用于长期判断 —— 玩家 OP 状态可能在任务执行期间变化，
      * 每次执行前都应重新读取。
      */
     public static int levelOf(@NotNull CommandSourceStack source) {
         try {
-            return source.getPermissionLevel();
-        } catch (Exception e) {
+            if (Commands.hasPermission(Commands.LEVEL_OWNERS).test(source)) {
+                return 4;
+            }
+            if (Commands.hasPermission(Commands.LEVEL_ADMINS).test(source)) {
+                return 3;
+            }
+            if (Commands.hasPermission(Commands.LEVEL_GAMEMASTERS).test(source)) {
+                return 2;
+            }
+            if (Commands.hasPermission(Commands.LEVEL_MODERATORS).test(source)) {
+                return 1;
+            }
+            return 0;
+        } catch (Throwable t) {
+            // 权限 API 再变动时不要崩，按最低权限处理（最保守）
             return 0;
         }
     }

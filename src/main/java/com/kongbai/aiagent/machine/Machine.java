@@ -205,7 +205,7 @@ public final class Machine {
                     onElement != null ? onElement.getAsString() : null,
                     offElement != null ? offElement.getAsString() : null,
                     uuid, JsonUtil.stringOr(obj, "", "ownerName"), permLevel);
-        } catch (IllegalArgumentException | RuntimeException e) {
+        } catch (RuntimeException e) {
             return null;
         }
     }

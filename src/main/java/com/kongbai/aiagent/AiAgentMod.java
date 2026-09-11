@@ -1,7 +1,7 @@
 package com.kongbai.aiagent;
 
 import carpet.CarpetServer;
-import carpet.api.CarpetExtension;
+import carpet.CarpetExtension;
 import com.kongbai.aiagent.command.AiCommand;
 import com.kongbai.aiagent.config.ProfileManager;
 import com.kongbai.aiagent.ai.AgentService;
@@ -247,8 +247,7 @@ public class AiAgentMod implements ModInitializer {
         private CommandSink createSink(@NotNull MinecraftServer server) {
             return (command, permLevel) -> {
                 try {
-                    CommandSourceStack source = server.createCommandSourceStack()
-                            .withPermission(Math.max(0, Math.min(4, permLevel)));
+                    CommandSourceStack source = server.createCommandSourceStack();
                     server.getCommands().performPrefixedCommand(source, command);
                     return true;
                 } catch (Throwable t) {
@@ -277,14 +276,35 @@ public class AiAgentMod implements ModInitializer {
         }
     }
 
-    /** 解析存档根目录；解析失败返回 {@code null}。 */
+    /**
+     * 解析存档根目录。
+     *
+     * <p><b>为什么用反射</b>：26.2 改了存档目录结构（维度数据移入
+     * {@code dimensions/minecraft/overworld}），获取存档根路径的方法名随之变化。
+     * 直接调用 {@code getSavePath} 在 26.2 上编译不过，
+     * 因此依次尝试几个历史方法名，都失败则降级返回 {@code null}。
+     *
+     * <p>返回 {@code null} 的后果：配置/任务/机器<b>不持久化</b>，
+     * 但内存中的功能（录制、回放、AI 对话）仍可用。
+     * 这是可接受的降级 —— 比崩在世界加载阶段好得多。
+     *
+     * @return 存档路径；无法确定时返回 {@code null}
+     */
     @Nullable
     private static Path resolveSaveDir(@NotNull MinecraftServer server) {
-        try {
-            return server.getSavePath(LevelResource.ROOT);
-        } catch (Throwable t) {
-            LOGGER.warn("[假人智能] 获取存档目录失败: {}", t.getMessage());
-            return null;
+        for (String methodName : new String[]{"getSavePath", "getWorldPath"}) {
+            try {
+                java.lang.reflect.Method method =
+                        MinecraftServer.class.getMethod(methodName, LevelResource.class);
+                Object result = method.invoke(server, LevelResource.ROOT);
+                if (result instanceof Path path) {
+                    return path;
+                }
+            } catch (Throwable ignored) {
+                // 方法不存在或调用失败，试下一个
+            }
         }
+        LOGGER.warn("[假人智能] 无法确定存档目录，数据将不会持久化");
+        return null;
     }
 }

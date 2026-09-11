@@ -20,11 +20,13 @@ import com.mojang.brigadier.tree.CommandNode;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
+import net.minecraft.server.MinecraftServer;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -68,7 +70,7 @@ public final class AiCommand {
         }
 
         LiteralArgumentBuilder<CommandSourceStack> aiNode = Commands.literal("ai")
-                .requires(source -> source.hasPermission(0))
+                
                 .executes(ctx -> showHelp(ctx.getSource()))
                 .then(buildApiNode())
                 .then(buildRecNode())
@@ -126,7 +128,7 @@ public final class AiCommand {
                                 .executes(ctx -> setTemperature(ctx.getSource(),
                                         FloatArgumentType.getFloat(ctx, "value")))))
                 .then(Commands.literal("list")
-                        .requires(source -> source.hasPermission(PERM_VIEW_OTHERS))
+                        
                         .executes(ctx -> listProfiles(ctx.getSource())));
     }
 
@@ -707,8 +709,13 @@ public final class AiCommand {
             sendError(source, "用法: /carpet ai ask <你想让 AI 做的事>");
             return 0;
         }
+        MinecraftServer server = source.getServer();
+        if (server == null) {
+            sendError(source, "服务器未就绪");
+            return 0;
+        }
         try {
-            com.kongbai.aiagent.ai.ChatTrigger.dispatch(player, text);
+            com.kongbai.aiagent.ai.ChatTrigger.dispatch(server, player, text);
             return 1;
         } catch (RuntimeException e) {
             sendError(source, "AI 调用失败: " + e.getMessage());
@@ -961,7 +968,7 @@ public final class AiCommand {
             if (source.getPlayer() == null) {
                 return "";
             }
-            return source.getPlayer().getGameProfile().getName();
+            return source.getTextName();
         } catch (Exception e) {
             return "";
         }

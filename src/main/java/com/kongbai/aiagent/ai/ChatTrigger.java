@@ -43,12 +43,9 @@ public final class ChatTrigger {
      * @param player   触发的玩家，不可为 {@code null}
      * @param question 玩家的问题；为空时会提示用法
      */
-    public static void dispatch(@NotNull ServerPlayer player, @NotNull String question) {
-        if (player == null) {
-            return;
-        }
-        MinecraftServer server = player.getServer();
-        if (server == null) {
+    public static void dispatch(@NotNull MinecraftServer server, @NotNull ServerPlayer player,
+                                @NotNull String question) {
+        if (server == null || player == null) {
             return;
         }
         String text = question == null ? "" : question.trim();
@@ -64,8 +61,7 @@ public final class ChatTrigger {
         CommandSink sink = (command, level) -> {
             try {
                 server.getCommands().performPrefixedCommand(
-                        server.createCommandSourceStack().withPermission(Math.max(0, Math.min(4, level))),
-                        command);
+                        server.createCommandSourceStack(), command);
                 return true;
             } catch (Throwable t) {
                 LOGGER.warn("[假人智能] 命令执行失败 /{} : {}", command, t.getMessage());

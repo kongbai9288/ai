@@ -2,6 +2,7 @@ package com.kongbai.aiagent.mixin;
 
 import com.kongbai.aiagent.ai.ChatTrigger;
 import net.minecraft.network.protocol.game.ServerboundChatPacket;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.network.ServerGamePacketListenerImpl;
 import org.spongepowered.asm.mixin.Mixin;
@@ -93,10 +94,11 @@ public class ChatMixin {
             if (player == null) {
                 return;
             }
-            if (player.getServer() == null) {
+            MinecraftServer server = resolveServer(this);
+            if (server == null) {
                 return;
             }
-            ChatTrigger.dispatch(player, question);
+            ChatTrigger.dispatch(server, player, question);
         } catch (Throwable t) {
             // 吞掉一切异常：聊天触发绝不能阻断玩家发言
         }
@@ -126,6 +128,35 @@ public class ChatMixin {
         } catch (Throwable t) {
             // 取不到就放弃，不要反复重试
             playerField = NOT_FOUND;
+            return null;
+        }
+    }
+
+    /**
+     * 通过反射从监听器实例中取服务器实例。
+     *
+     * <p>与取 player 同理：字段名在不同版本叫法不一，用反射 + try-catch 兜底。
+     */
+    @org.jetbrains.annotations.Nullable
+    private static MinecraftServer resolveServer(@org.jetbrains.annotations.NotNull Object listener) {
+        try {
+            Class<?> current = ServerGamePacketListenerImpl.class;
+            while (current != null && current != Object.class) {
+                for (Field declared : current.getDeclaredFields()) {
+                    if (declared.getType().equals(MinecraftServer.class)) {
+                        try {
+                            declared.setAccessible(true);
+                            Object value = declared.get(listener);
+                            return value instanceof MinecraftServer ms ? ms : null;
+                        } catch (Throwable ignored) {
+                            // 继续找
+                        }
+                    }
+                }
+                current = current.getSuperclass();
+            }
+            return null;
+        } catch (Throwable t) {
             return null;
         }
     }
