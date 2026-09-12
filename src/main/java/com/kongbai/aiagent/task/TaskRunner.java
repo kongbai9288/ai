@@ -65,6 +65,14 @@ public final class TaskRunner {
      */
     public static final long KEEPALIVE_CHECK_TICKS = 100L;
 
+    /**
+     * 幻翼周期：{@code time_since_rest} 达到 72000 刻（3 游戏日）才可能生成幻翼。
+     *
+     * <p>「重生洗白」的间隔取 60000 刻（< 72000），留出余量，
+     * 确保假人的计时永远够不到阈值。
+     */
+    public static final long PHANTOM_PERIOD_TICKS = 60000L;
+
 
     private static final TaskRunner INSTANCE = new TaskRunner();
 
@@ -327,6 +335,14 @@ public final class TaskRunner {
         private long lastKeepaliveTick = -1L;
         /** 是否在等待 spawn 就绪后再补发保护效果。 */
         private boolean pendingProtection;
+
+        /** 假人就绪流程的当前阶段。 */
+        private Phase phase = Phase.NEED_SPAWN;
+        /**
+         * 上次「重生洗白」（真死一次重置幻翼计时）的刻。
+         * 为 -1 表示还没做过。
+         */
+        private long lastWashTick = -1L;
         /** 安全出生点（取自任务的第一个移动动作）。 */
         private final double spawnX;
         private final double spawnY;
@@ -372,6 +388,42 @@ public final class TaskRunner {
             return null;
         }
 
+        /** 假人就绪流程的阶段。 */
+        private enum Phase {
+            /** 需要召唤。 */
+            NEED_SPAWN,
+            /** 已发 spawn，等待 Carpet 异步创建完成。 */
+            WARMUP,
+            /** 已就绪，需要「真死一次」重置幻翼计时。 */
+            NEED_WASH,
+            /** 已发 /kill，等待死亡处理完成。 */
+            WASHING,
+            /** 全部就绪，可以开始执行动作。 */
+            READY
+        }
+
+        /**
+         * 当前是否需要「重生洗白」（真死一次重置幻翼计时）。
+         *
+         * <p>只在 {@link com.kongbai.aiagent.util.PermissionPolicy.PhantomMode#RESPAWN}
+         * 模式下生效。条件：从未洗过，或距上次洗白已超过一个幻翼周期
+         * （{@link #PHANTOM_PERIOD_TICKS}，3 游戏日）。
+         *
+         * <p><b>为什么是 3 游戏日</b>：幻翼要求 {@code time_since_rest >= 72000} 刻才生成，
+         * 所以只要在 72000 刻内洗一次，就永远不会达到阈值。
+         */
+        private boolean shouldWash(long currentTick) {
+            if (!com.kongbai.aiagent.util.PermissionPolicy.getInstance()
+                    .phantomMode().equals(
+                            com.kongbai.aiagent.util.PermissionPolicy.PhantomMode.RESPAWN)) {
+                return false;
+            }
+            if (lastWashTick < 0) {
+                return true;
+            }
+            return currentTick - lastWashTick >= PHANTOM_PERIOD_TICKS;
+        }
+
         /**
          * 生成召唤命令。
          *
@@ -405,43 +457,81 @@ public final class TaskRunner {
             // 目标：确保回放期间「假人一直存在、且站在正确的位置、且活着」。
             // 缺任何一环，后续命令都会静默失败，回放看着在跑实则空转。
             if (fakeName != null) {
-                if (!spawned) {
-                    // 首次召唤：用安全坐标（避开可能被破坏的世界出生点）
-                    spawned = true;
-                    sink.execute(spawnCommand(), effectivePermLevel);
-                    pendingProtection = true;
-                    warmupUntilTick = currentTick + SPAWN_WARMUP_TICKS;
-                    lastKeepaliveTick = currentTick;
-                    return; // 等异步 spawn 就绪后再开始执行动作
-                }
-                if (currentTick < warmupUntilTick) {
-                    return; // Carpet 的假人创建是异步的，还没就绪
-                }
-                if (pendingProtection) {
-                    // spawn 已完成，补发保护（抗性/饱和/防火），防怪物与摔落干扰
-                    pendingProtection = false;
-                    for (String cmd : FakePlayerNaming.protectionCommands(fakeName)) {
-                        sink.execute(cmd, effectivePermLevel);
+                switch (phase) {
+                    case NEED_SPAWN -> {
+                        // 首次召唤：用安全坐标（避开可能被破坏的世界出生点）
+                        spawned = true;
+                        lastKeepaliveTick = currentTick;
+                        sink.execute(spawnCommand(), effectivePermLevel);
+                        warmupUntilTick = currentTick + SPAWN_WARMUP_TICKS;
+                        phase = Phase.WARMUP;
+                        return;
                     }
-                    // 保护生效后再把假人精确放到出生点（重生动量可能让它偏移）
-                    if (hasSpawnPos) {
-                        sink.execute(FakePlayerNaming.teleportCommand(
-                                fakeName, spawnX, spawnY, spawnZ), effectivePermLevel);
+                    case WARMUP -> {
+                        if (currentTick < warmupUntilTick) {
+                            return; // Carpet 的假人创建是异步的，还没就绪
+                        }
+                        // 判断是否需要「重生洗白」重置幻翼计时
+                        if (shouldWash(currentTick)) {
+                            phase = Phase.NEED_WASH;
+                        } else {
+                            phase = Phase.READY;
+                        }
+                        return; // 下一刻再进入新阶段，保持每刻只推进一步
                     }
-                }
-                if (currentTick - lastKeepaliveTick >= KEEPALIVE_CHECK_TICKS) {
-                    // 定期保活：假人可能被怪物打死/掉虚空，Carpet 原生会直接掉线。
-                    // 重发 spawn —— 还在就复用，不在就复活。
-                    lastKeepaliveTick = currentTick;
-                    sink.execute(spawnCommand(), effectivePermLevel);
-                    warmupUntilTick = currentTick + SPAWN_WARMUP_TICKS;
-                    pendingProtection = true;
-                    return;
+                    case NEED_WASH -> {
+                        // 真死一次：重置 time_since_rest，让幻翼 3 天内不再针对它。
+                        // 必须用原版 /kill —— /player X kill 是「登出」，不算死亡。
+                        lastWashTick = currentTick;
+                        sink.execute(FakePlayerNaming.killForResetCommand(fakeName),
+                                effectivePermLevel);
+                        warmupUntilTick = currentTick + SPAWN_WARMUP_TICKS;
+                        phase = Phase.WASHING;
+                        return;
+                    }
+                    case WASHING -> {
+                        if (currentTick < warmupUntilTick) {
+                            return;
+                        }
+                        // 假人死亡后 Carpet 会让它掉线，重新召唤复活
+                        sink.execute(spawnCommand(), effectivePermLevel);
+                        warmupUntilTick = currentTick + SPAWN_WARMUP_TICKS;
+                        pendingProtection = true;
+                        phase = Phase.WARMUP;
+                        return;
+                    }
+                    case READY -> {
+                        if (pendingProtection) {
+                            // 补发保护（抗性/饱和/防火），防怪物与摔落干扰
+                            pendingProtection = false;
+                            for (String cmd : FakePlayerNaming.protectionCommands(fakeName)) {
+                                sink.execute(cmd, effectivePermLevel);
+                            }
+                            // 保护生效后再精确放到出生点（重生动量可能让它偏移）
+                            if (hasSpawnPos) {
+                                sink.execute(FakePlayerNaming.teleportCommand(
+                                        fakeName, spawnX, spawnY, spawnZ), effectivePermLevel);
+                            }
+                        }
+                        if (currentTick - lastKeepaliveTick >= KEEPALIVE_CHECK_TICKS) {
+                            // 定期保活：假人可能被怪物打死/掉虚空，Carpet 原生会直接掉线。
+                            // 重发 spawn —— 还在就复用，不在就复活。
+                            lastKeepaliveTick = currentTick;
+                            sink.execute(spawnCommand(), effectivePermLevel);
+                            warmupUntilTick = currentTick + SPAWN_WARMUP_TICKS;
+                            pendingProtection = true;
+                            phase = Phase.WARMUP;
+                            return;
+                        }
+                        // 幻翼计时会随时间重新累积，到 3 天后再洗一次
+                        if (shouldWash(currentTick)) {
+                            phase = Phase.NEED_WASH;
+                            return;
+                        }
+                    }
                 }
                 // 注意：这里刻意【不做】「每刻 tp 回出生点」来抗幻翼击退 ——
                 // 那会把假人钉死在出生点，直接摧毁回放轨迹。
-                // 幻翼防护改为从源头关闭生成，见 PermissionPolicy#phantomGuard
-                // 与 /carpet ai bot phantom。
             }
             long elapsed = Math.max(0, currentTick - startTick);
             List<RecordedAction> actions = task.actions();

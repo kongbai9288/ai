@@ -297,26 +297,15 @@ public class AiAgentMod implements ModInitializer {
         @NotNull
         private CommandSink createSink(@NotNull MinecraftServer server,
                                        @NotNull Auditor.Source source) {
-            return (command, permLevel) -> {
-                long tick = server.getTickCount();
-                try {
-                    CommandSourceStack stack = server.createCommandSourceStack();
-                    // 关键：必须降权。server.createCommandSourceStack() 给的是服务器自身
-                    // （OWNER / 等级 4）权限，若直接派发，任何玩家录制的任务、乃至 AI
-                    // 生成的命令都会以 OP 身份执行 —— 这就是提权漏洞。
-                    // 这里压到任务创建者的等级，白名单之外再由 Brigadier 自己兜住。
-                    stack = PermissionGuard.clamp(stack, permLevel);
-                    server.getCommands().performPrefixedCommand(stack, command);
-                    Auditor.getInstance().record(tick, null, permLevel, command,
-                            Auditor.Result.EXECUTED, source, null);
-                    return true;
-                } catch (Throwable t) {
-                    LOGGER.warn("[假人智能] 命令执行失败 /{} : {}", command, t.getMessage());
-                    Auditor.getInstance().record(tick, null, permLevel, command,
-                            Auditor.Result.FAILED, source, t.getMessage());
-                    return false;
-                }
-            };
+            // 复用 AiAgentMod.createCommandSink —— 它内部会过 PermissionGuard，
+            // 是「最后一道兜底」。
+            //
+            // 为什么不能自己实现一遍：本方法此前就是自己派发的，
+            // 只做了降权、**没有过权限闸门**。回放器经由本方法下发的命令
+            // （包括任务里录制的 COMMAND 动作）因此绕过了白名单校验 ——
+            // TaskRunner 里虽然校验了一次，但那是调用点级别的，
+            // 一旦新增调用点漏校验就直达派发。兜底必须放在投递器里。
+            return AiAgentMod.createCommandSink(server, source);
         }
 
         /**

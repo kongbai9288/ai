@@ -380,10 +380,15 @@ public final class AiCommand {
                                         StringArgumentType.getString(ctx, "name")))))
                 .then(Commands.literal("phantom")
                         .executes(ctx -> phantomStatus(ctx.getSource()))
+                        .then(Commands.literal("respawn")
+                                .executes(ctx -> phantomModeSet(ctx.getSource(),
+                                        PermissionPolicy.PhantomMode.RESPAWN)))
+                        .then(Commands.literal("gamerule")
+                                .executes(ctx -> phantomModeSet(ctx.getSource(),
+                                        PermissionPolicy.PhantomMode.GAMERULE)))
                         .then(Commands.literal("off")
-                                .executes(ctx -> phantomSet(ctx.getSource(), false)))
-                        .then(Commands.literal("on")
-                                .executes(ctx -> phantomSet(ctx.getSource(), true))));
+                                .executes(ctx -> phantomModeSet(ctx.getSource(),
+                                        PermissionPolicy.PhantomMode.OFF))));
     }
 
     /** {@code /carpet ai sched ...} 长期任务。 */
@@ -1233,37 +1238,49 @@ public final class AiCommand {
     }
 
     /**
-     * 幻翼开关（一键 {@code /gamerule spawn_phantoms}）。
+     * 幻翼防护。
      *
-     * <p><b>为什么需要</b>：幻翼生成条件是「玩家 3 游戏日未上床睡觉」。
+     * <p><b>为什么需要</b>：幻翼生成条件是「玩家 3 游戏日（72000 刻）未上床睡觉」。
      * <b>假人永远不会睡觉</b>，所以长期挂机必然招来幻翼，且它会<b>持续</b>生成 ——
      * 幻翼生成时无视敌对生物上限，抗性只挡伤害、挡不住持续骚扰与被击退。
      *
-     * <p><b>为什么不做「被打死后自动复活」来重置</b>：死亡确实能重置 insomnia 计时，
-     * 但 Carpet 的假人死亡 = 掉线 + 掉落物品，代价太大。
-     * 从源头关掉生成才是干净做法。
+     * <p><b>三种模式</b>：
+     * <ul>
+     *   <li>{@code respawn}（默认）—— 让假人「真死一次」再复活，重置
+     *       {@code time_since_rest} 计时。据 Wiki 该统计
+     *       "is reset when the player dies or enters a bed"。</li>
+     *   <li>{@code gamerule} —— {@code /gamerule spawn_phantoms false}，
+     *       从源头关闭生成，确定有效但影响全服。</li>
+     *   <li>{@code off} —— 不做防护。</li>
+     * </ul>
      *
-     * <p>注意 {@code spawn_phantoms} 是 Java 26.2 的新名字（原 {@code doInsomnia}），
-     * 且这是<b>全服规则</b> —— 关掉后所有玩家都不会再因失眠刷幻翼。
+     * <p><b>关键：必须用原版 {@code /kill}，不是 {@code /player X kill}</b>。
+     * 后者是「让假人退出服务器」（logout），不算死亡，<b>不重置</b>计时。
      */
     private static int phantomStatus(@NotNull CommandSourceStack source) {
-        boolean guard = PermissionPolicy.getInstance().phantomGuard();
-        send(source, "§6幻翼防护: " + (guard ? "§a开启" : "§7关闭"));
+        PermissionPolicy.PhantomMode mode = PermissionPolicy.getInstance().phantomMode();
+        send(source, "§6幻翼防护模式: §f" + mode.id());
         send(source, "§7假人永不睡觉，长期挂机必然招幻翼（3 游戏日后开始生成，"
                 + "且生成时无视生物上限）");
-        send(source, "§7关闭幻翼生成: §f/carpet ai bot phantom off");
-        send(source, "§8等价于 /gamerule spawn_phantoms false（全服规则，影响所有玩家）");
+        send(source, "§7可用模式:");
+        send(source, "§f  respawn  §7假人真死一次再复活，重置计时（默认）");
+        send(source, "§8       代价：掉落物品 + 需重新召唤；只在任务开始时执行");
+        send(source, "§f  gamerule §7关闭幻翼生成（全服规则，影响所有玩家）");
+        send(source, "§f  off      §7不做防护");
+        send(source, "§7切换: §f/carpet ai bot phantom <模式>");
         return 1;
     }
 
-    private static int phantomSet(@NotNull CommandSourceStack source, boolean enableSpawn) {
+    private static int phantomModeSet(@NotNull CommandSourceStack source,
+                                      @NotNull PermissionPolicy.PhantomMode mode) {
         MinecraftServer server = source.getServer();
         if (server == null) {
             sendError(source, "服务器未就绪");
             return 0;
         }
-        // 幻翼生成开关：false = 阻止生成（防护开启）
-        String command = "gamerule spawn_phantoms " + (enableSpawn ? "true" : "false");
+        // GAMERULE 模式需要立刻把生成关掉（OFF/RESPAWN 则恢复生成）
+        boolean disableSpawn = mode == PermissionPolicy.PhantomMode.GAMERULE;
+        String command = "gamerule spawn_phantoms " + (disableSpawn ? "false" : "true");
         String reason = PermissionGuard.check(command);
         if (reason != null) {
             sendError(source, reason);
@@ -1271,10 +1288,20 @@ public final class AiCommand {
         }
         AiAgentMod.createCommandSink(server, Auditor.Source.PLAYER)
                 .execute(command, PermissionGuard.levelOf(source));
-        PermissionPolicy.getInstance().setPhantomGuard(!enableSpawn, false);
-        send(source, enableSpawn
-                ? "§6已恢复幻翼生成（假人长期挂机会被骚扰）"
-                : "§a已关闭幻翼生成（全服规则，假人不再被幻翼干扰）");
+        PermissionPolicy phantomPolicy = PermissionPolicy.getInstance();
+        phantomPolicy.setPhantomMode(mode, false);
+
+        switch (mode) {
+            case RESPAWN -> send(source, "§a已设为 respawn：假人会「真死一次」再复活以重置幻翼计时");
+            case GAMERULE -> {
+                send(source, "§a已关闭幻翼生成（全服规则）");
+                send(source, "§6注意：所有玩家都不会再因失眠刷幻翼");
+            }
+            case OFF -> send(source, "§6已关闭幻翼防护，假人长期挂机会被幻翼骚扰");
+        }
+        if (!phantomPolicy.isAttached()) {
+            send(source, "§6策略系统未挂载，重启世界后会丢失该设置");
+        }
         return 1;
     }
 

@@ -105,21 +105,12 @@ public final class ChatTrigger {
         // （等级 4）权限。AI 回复属于完全不可信输入，若以 OP 身份执行，
         // 白名单一旦有疏漏就是完整的服务器提权。这里压到触发玩家自己的等级，
         // 再由 Brigadier 兜住第二道。
-        CommandSink sink = (command, level) -> {
-            try {
-                CommandSourceStack stack =
-                        PermissionGuard.clamp(server.createCommandSourceStack(), level);
-                server.getCommands().performPrefixedCommand(stack, command);
-                Auditor.getInstance().record(server.getTickCount(), player.getGameProfile().name(),
-                        level, command, Auditor.Result.EXECUTED, Auditor.Source.AI, null);
-                return true;
-            } catch (Throwable t) {
-                LOGGER.warn("[假人智能] 命令执行失败 /{} : {}", command, t.getMessage());
-                Auditor.getInstance().record(server.getTickCount(), player.getGameProfile().name(),
-                        level, command, Auditor.Result.FAILED, Auditor.Source.AI, t.getMessage());
-                return false;
-            }
-        };
+        // 复用 AiAgentMod.createCommandSink：它内部会过 PermissionGuard。
+        // 本处此前只做了降权、**没有过闸门** —— AI 回复是完全不可信输入，
+        // AgentService 虽然校验了一次，但那是调用点级别的；
+        // 兜底必须放在投递器里，任何调用路径都绕不开。
+        CommandSink sink = com.kongbai.aiagent.AiAgentMod.createCommandSink(
+                server, Auditor.Source.AI);
 
         send(player, "§8[假人智能] 思考中...");
 

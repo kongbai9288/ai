@@ -296,6 +296,32 @@ public final class FakePlayerNaming {
     }
 
     /**
+     * 生成「让假人<b>真死一次</b>」的命令 —— 用于重置幻翼的 insomnia 计时。
+     *
+     * <p><b>必须用原版 {@code /kill}，不能用 {@code /player X kill}</b>：
+     * <ul>
+     *   <li>{@code /player X kill} = 让假人<b>退出服务器</b>（logout），
+     *       Carpet 文档原话是「使假玩家退出当前存档或者服务器，同时保留他身上的物品」。
+     *       这是<b>登出</b>，不是死亡 —— <b>不会</b>重置 insomnia 计时。</li>
+     *   <li>{@code /kill X} = 原版击杀 = <b>真死亡</b>。
+     *       据 Minecraft Wiki，{@code time_since_rest} 统计
+     *       「is reset when the player dies or enters a bed」。</li>
+     * </ul>
+     * 用错命令这个方案是无效的，而且很难排查（假人看起来「重连」了，但幻翼照来）。
+     *
+     * <p><b>代价</b>：假人死亡会掉落身上物品（若 {@code keepInventory=false}），
+     * 且 Carpet 的假人死亡后会<b>掉线</b>。因此本命令只应在
+     * 「假人刚召唤、还没拿到工具」时执行 —— 也就是任务开始阶段。
+     * 之后需再 {@code /player X spawn} 复活。
+     *
+     * @see #spawnCommand(String)
+     */
+    @NotNull
+    public static String killForResetCommand(@NotNull String fakeName) {
+        return "kill " + fakeName;
+    }
+
+    /**
      * 生成「传送已存在假人」的命令。
      *
      * <p><b>为什么不是 {@code /player X tp}</b>：

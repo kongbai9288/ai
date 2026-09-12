@@ -68,6 +68,9 @@ public final class PermissionGuard {
             // 受限的实体/物品操作（仍需通过降权 source 校验权限等级）
             "summon", "give", "clear", "effect", "tp", "teleport",
             "gamemode", "weather", "time", "gamerule", "setworldspawn",
+            // 击杀：仅用于让假人「真死一次」重置幻翼计时；
+            // 目标被强制限制为 ai_ 假人（见 TARGET_ARG_INDEX），禁止选择器
+            "kill",
             // Carpet：仅允许查询规则 + 本模组的机器控制（见 checkCarpet）
             "carpet"
     );
@@ -194,7 +197,12 @@ public final class PermissionGuard {
             "tp", 1,
             "teleport", 1,
             "clear", 1,
-            "gamemode", 2
+            "gamemode", 2,
+            // kill 是原版击杀命令，目标是任意实体 —— 风险极高。
+            // 放行它的唯一理由：让假人「真死一次」以重置幻翼的 insomnia 计时
+            // （见 FakePlayerNaming#killForResetCommand）。
+            // 因此目标被死死限制在本模组的 ai_ 假人上，且禁止一切选择器。
+            "kill", 1
     );
 
     /**

@@ -234,24 +234,45 @@ Carpet 的 `commandPlayer` 默认 `ops`，降权后普通玩家触发的这类�
 幻翼生成条件：**玩家 3 游戏日（72000 刻）未上床睡觉**。**假人永远不会睡觉**，
 所以长期挂机必然招来幻翼，且它会**持续**生成（幻翼生成时**无视敌对生物上限**）。
 
-抗性 255 挡得住伤害，但挡不住：持续骚扰、被击退位移（后续 `use` 全部打偏）、占用服务器资源。
+三种模式，用 `/carpet ai bot phantom <模式>` 切换（持久化）：
 
-**推荐做法** —— 从源头关闭（一键）：
+| 模式 | 做法 | 说明 |
+|---|---|---|
+| `respawn`（默认） | 假人**真死一次**再复活 | 重置 `time_since_rest` 计时 |
+| `gamerule` | `/gamerule spawn_phantoms false` | 从源头关闭生成，确定有效但影响全服 |
+| `off` | 不做防护 | — |
+
+**关键：`respawn` 必须用原版 `/kill`，不是 `/player X kill`。**
 
 ```
-/carpet ai bot phantom          查看状态
-/carpet ai bot phantom off      关闭幻翼生成
-/carpet ai bot phantom on       恢复
+/player X kill  = 让假人「退出服务器」（logout），保留物品
+                  → 是登出，不是死亡 → 不重置计时 ❌
+/kill X         = 原版击杀 = 真死亡
+                  → Minecraft Wiki: "time_since_rest is reset when the
+                     player dies or enters a bed" ✅
 ```
 
-等价于 `/gamerule spawn_phantoms false`（Java 26.2 新名，原 `doInsomnia`）。
-**注意这是全服规则**，关掉后所有玩家都不会因失眠刷幻翼。
+用错命令这个方案是无效的，而且极难排查 —— 假人看起来「重连」了，但幻翼照来。
 
-> **为什么不做「被打死后自动复活重置」**：死亡确实能重置 insomnia 计时，
-> 但 Carpet 假人死亡 = 掉线 + 掉落物品，代价太大。
+**执行时机**：spawn 就绪后、开始干活前。此时假人刚召唤、还没拿到工具，
+死亡不会损失物品。之后每 60000 刻（< 72000 阈值）再洗一次，
+确保计时永远够不到幻翼的生成阈值。
+
+**代价**：
+- 假人死亡会掉落物品（若 `keepInventory=false`）—— 所以只在任务开始时执行
+- Carpet 假人死亡后会**掉线**，需再 `spawn` 复活（流程已自动处理）
+- 每次洗白多约 10 刻（两次异步等待）
+
+> ⚠️ **来源存在冲突**：Minecraft Wiki（权威）称死亡会重置 `time_since_rest`，
+> 但也有资料称该统计「persistent through player death，只有上床才清零」。
+> 本模组采用 Wiki 的说法实现 `respawn` 模式，**若实测无效请切到 `gamerule`**
+> —— 后者是确定有效的。
 >
-> **为什么不每刻 `tp` 回出生点**：那会把假人钉死，
-> 直接摧毁回放轨迹（我实现过一次，发现后已撤回）。
+> ⚠️ **`/kill` 已加入白名单但目标被死死限制**：只能作用于 `ai_` 前缀的假人，
+> 且**禁止一切选择器**。实测 `kill @e[type=!player]` / `kill @a` / `kill Steve` 全部拦截。
+
+**为什么不做「每刻 `tp` 回出生点」抗击退**：那会把假人钉死在出生点，
+直接摧毁回放轨迹。（实现过一次，发现后已撤回。）
 
 ### 其他模组的 carpet 扩展命令
 
@@ -266,6 +287,23 @@ Carpet 扩展（TIS Carpet Addition、GCA、Carpet-Org-Addition 等）注册的�
 Carpet 规则修改（3 段式，如 `/carpet commandScript true`）**一律拦截** ——
 `commandScript` / `commandScriptACE` 能开启 Scarpet 任意代码执行，
 放行了等于把服务器完全交出去。实测已拦截。
+
+### 三处命令派发点，只有一处过了闸门
+
+全量检测发现：代码里共有 **3 处**直接派发命令的地方，但「最后一道兜底」
+（投递器内过 `PermissionGuard`）只加在了其中 1 处：
+
+| 位置 | 修复前 |
+|---|---|
+| `AiAgentMod.createCommandSink`（静态） | ✅ 有闸门 |
+| `AiAgentExtension.createSink`（回放用） | ❌ 只降权，无闸门 |
+| `ChatTrigger` 的 sink（AI 用） | ❌ 只降权，无闸门 |
+
+回放和 AI 两条路径此前都靠**调用点**校验（`TaskRunner` / `AgentService`），
+一旦新增调用点漏校验就直达派发。现在三处统一复用同一个实现，闸门不可绕过。
+
+> 这是「兜底应该放在最底层」的典型教训 ——
+> 只在调用点校验，等于把安全性寄托在「每个调用点都记得校验」上。
 
 ### HTTP 客户端
 
