@@ -41,11 +41,21 @@ Minecraft **26.2** + Fabric + Carpet 的附属模组。让 AI 通过 Carpet 命�
 | **权限降权** | `PermissionGuard.clamp` | 把命令源压到**任务开启者**的等级再派发 |
 | 操作审计 | `Auditor` | 记录每条命令的处置结果，可事后追溯 |
 
-> ⚠️ **降权这道防线以前是失效的**：`clamp()` 曾因「26.1 后找不到构造权限集的 API」
-> 而直接 `return source`（原样返回 OP 命令源）。26.2 的正确写法是
-> `source.withPermission(LevelBasedPermissionSet.forLevel(PermissionLevel.byId(level)))`，
-> 现已修复。若再次遇到权限 API 变动，`clamp()` 会退回 `NO_PERMISSIONS`
+> ⚠️ **降权这道防线以前是失效的，而且坏了两处**：
+>
+> 1. `PermissionGuard.clamp()` 曾因「26.1 后找不到构造权限集的 API」
+>    而直接 `return source`（原样返回 OP 命令源）。26.2 的正确写法是
+>    `source.withPermission(LevelBasedPermissionSet.forLevel(PermissionLevel.byId(level)))`。
+> 2. **`ChatTrigger`（AI 对话路径）根本没调用 `clamp()`** —— 它收下了 `level`
+>    参数却直接 `server.createCommandSourceStack()`，即以等级 4 执行。
+>    这是最危险的一处：AI 回复属于完全不可信输入。
+>
+> 两处均已修复。若权限 API 再变动，`clamp()` 会退回 `NO_PERMISSIONS`
 > （宁可命令因权限不足失败，也绝不静默放行）。
+
+**限流**：聊天触发没有权限和消耗门槛，玩家刷屏「你好ai」即可持续打爆自己的 API 配额
+并在服务端堆积并发 HTTP 请求。已加 3 秒/人的最小请求间隔（记真实时间而非游戏刻 ——
+服务器卡顿时游戏刻推进很慢，用刻限流形同虚设）。
 
 **审计日志**记录：游戏刻、命令（脱敏）、权限等级、来源（AI/回放/调度）、处置结果。
 `ai` 开头的命令只记录长度不记录原文 —— 因为 `/carpet ai api set ...` 会携带 API 密钥。

@@ -55,7 +55,14 @@ public class CommandsMixin {
             if (source == null) {
                 return;
             }
-            // 只对真人玩家录制的会话生效；命令方块/函数执行者没有 UUID，直接跳过
+            // 只对真人玩家执行的命令生效；命令方块/函数执行者没有玩家实例，直接跳过。
+            //
+            // 【这条判断同时是「录制不被回放污染」的唯一屏障，不要随意放宽】
+            // 回放的 CommandSink 用 server.createCommandSourceStack() 派发命令，
+            // 那是服务器级 source（getPlayer() 为 null），因此回放产生的
+            // 「player xxx tp ...」等命令不会被录进任务里。
+            // 一旦改成用玩家 source 回放，就会变成「回放 → 被录制 → 任务自我膨胀」，
+            // 且 TaskRecorder.shouldIgnoreCommand 只过滤 /carpet ai，挡不住这些。
             if (source.getPlayer() == null) {
                 return;
             }

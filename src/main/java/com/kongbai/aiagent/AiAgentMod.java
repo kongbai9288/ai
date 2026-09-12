@@ -5,6 +5,7 @@ import carpet.CarpetExtension;
 import com.kongbai.aiagent.command.AiCommand;
 import com.kongbai.aiagent.config.ProfileManager;
 import com.kongbai.aiagent.ai.AgentService;
+import com.kongbai.aiagent.ai.ChatTrigger;
 import com.kongbai.aiagent.machine.MachineRegistry;
 import com.kongbai.aiagent.task.BlockProbe;
 import com.kongbai.aiagent.task.CommandSink;
@@ -130,6 +131,7 @@ public class AiAgentMod implements ModInitializer {
             Scheduler.getInstance().stopAll();
             AgentService.getInstance().shutdown();
             Auditor.getInstance().clear();
+            ChatTrigger.clearCooldowns();
             LOGGER.info("[假人智能] 已卸载并保存全部数据");
         }
 

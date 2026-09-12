@@ -5,6 +5,8 @@ import net.minecraft.network.protocol.game.ServerboundChatPacket;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.network.ServerGamePacketListenerImpl;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -20,11 +22,14 @@ import java.lang.reflect.Field;
  * 在 26.2 的官方命名下不确定，写错会直接编译失败。
  * 而 mixin 用 {@code require = 0}：方法签名对不上时被静默跳过，<b>不影响编译</b>。
  *
- * <p><b>为什么用反射取 player</b>：
- * {@code ServerGamePacketListenerImpl} 中保存玩家实例的字段名
- * 在不同版本叫法不一（{@code player} / {@code c} / {@code this$0} 等）。
- * 用 {@code @Shadow} 硬写字段名，一旦版本对不上会在运行时抛异常；
- * 改用反射 + try-catch，找不到就静默降级，不会崩。
+ * <p><b>切入点已用 javap 核对</b>（MC 26.2 官方命名）：
+ * {@code ServerGamePacketListenerImpl.handleChat(ServerboundChatPacket)} 存在，
+ * 且 {@code ServerboundChatPacket.message()} 可用。
+ *
+ * <p><b>关于反射</b>：只剩一处 —— 从监听器实例取 {@code ServerPlayer}。
+ * 该字段在 26.2 中确为 {@code public ServerPlayer player}（已核对），
+ * 但历史上叫法不一（{@code c} / {@code this$0} 等），因此仍走反射 + 缓存，
+ * 找不到就降级。而<b>服务器实例不再用反射</b> —— 见 {@link #resolveServer}。
  *
  * <p><b>降级链</b>（每一层都保证「AI 功能变弱，但游戏不受影响」）：
  * <ol>
@@ -47,20 +52,18 @@ public class ChatMixin {
     private static final String[] TRIGGERS = {"你好，ai", "你好,ai", "你好ai", "hi,ai", "hi ai"};
 
     /**
-     * 缓存的 player 字段。
+     * 缓存的 player 字段；{@code null} 表示「找不到或取不到」。
      *
-     * <p>{@code null} = 尚未查找；{@code NOT_FOUND} = 已确认找不到（避免每次聊天都反射）。
+     * <p>配合 {@link #playerFieldResolved} 区分「尚未查找」与「已确认找不到」，
+     * 避免每次聊天都做一次全字段反射扫描。
+     *
+     * <p><b>不用哨兵 Field</b>：先前版本拿本类的 {@code playerField} 字段自己当
+     * 「未找到」哨兵，一旦有人重命名/删除该字段，静态初始化就会抛
+     * {@code ExceptionInInitializerError}，导致整个 mixin 类加载失败。
+     * 用一个 boolean 标记语义清晰且无此风险。
      */
     private static volatile Field playerField;
-    private static final Field NOT_FOUND;
-
-    static {
-        try {
-            NOT_FOUND = ChatMixin.class.getDeclaredField("playerField");
-        } catch (NoSuchFieldException e) {
-            throw new ExceptionInInitializerError(e);
-        }
-    }
+    private static volatile boolean playerFieldResolved = false;
 
     @Inject(method = "handleChat", at = @At("HEAD"), require = 0)
     private void aiagent$onChat(ServerboundChatPacket packet, CallbackInfo ci) {
@@ -73,13 +76,14 @@ public class ChatMixin {
                 return;
             }
             if (raw.startsWith("/")) {
-                return; // 命令不走聊天触发
+                return; // 命令在 26.2 走 handleChatCommand，这里兜个底
             }
 
             int matchIndex = -1;
             int matchedLength = 0;
+            String lower = raw.toLowerCase(java.util.Locale.ROOT);
             for (String trigger : TRIGGERS) {
-                int index = raw.indexOf(trigger);
+                int index = lower.indexOf(trigger);
                 if (index >= 0 && (matchIndex < 0 || index < matchIndex)) {
                     matchIndex = index;
                     matchedLength = trigger.length();
@@ -94,7 +98,7 @@ public class ChatMixin {
             if (player == null) {
                 return;
             }
-            MinecraftServer server = resolveServer(this);
+            MinecraftServer server = resolveServer(player);
             if (server == null) {
                 return;
             }
@@ -105,64 +109,58 @@ public class ChatMixin {
     }
 
     /**
-     * 通过反射从监听器实例中取玩家。
+     * 通过反射从监听器实例中取玩家（结果缓存）。
      *
      * @return 玩家实例；字段不存在或类型不符时返回 {@code null}
      */
-    @org.jetbrains.annotations.Nullable
-    private static ServerPlayer resolvePlayer(@org.jetbrains.annotations.NotNull Object listener) {
+    @Nullable
+    private static ServerPlayer resolvePlayer(@NotNull Object listener) {
         Field field = playerField;
-        if (field == NOT_FOUND) {
-            return null;
-        }
-        if (field == null) {
+        if (field == null && !playerFieldResolved) {
             field = lookupPlayerField();
             playerField = field;
-            if (field == NOT_FOUND) {
-                return null;
-            }
+            playerFieldResolved = true;
+        }
+        if (field == null) {
+            return null;
         }
         try {
             Object value = field.get(listener);
             return value instanceof ServerPlayer player ? player : null;
         } catch (Throwable t) {
-            // 取不到就放弃，不要反复重试
-            playerField = NOT_FOUND;
+            // 取不到就永久放弃，避免每条聊天都重试
+            playerField = null;
+            playerFieldResolved = true;
             return null;
         }
     }
 
     /**
-     * 通过反射从监听器实例中取服务器实例。
+     * 取服务器实例。
      *
-     * <p>与取 player 同理：字段名在不同版本叫法不一，用反射 + try-catch 兜底。
+     * <p><b>不再用反射</b>：先前版本会遍历 {@code ServerGamePacketListenerImpl}
+     * 及其父类的全部字段找一个 {@code MinecraftServer} 类型成员，
+     * 而该字段实际位于父类 {@code ServerCommonPacketListenerImpl} 且是
+     * {@code protected}。这条路径有两个问题：
+     * <ul>
+     *   <li><b>慢</b> —— 每次玩家发言都要扫一遍几十个字段，且与 player 字段的缓存策略不一致</li>
+     *   <li><b>脆</b> —— 依赖字段类型精确匹配，字段名/类型一变就静默失效
+     *       （而 {@code require = 0} 恰好会吞掉这个失败，玩家只会感觉「AI 不理我」）</li>
+     * </ul>
+     * 既然已经拿到了 {@code ServerPlayer}，直接用公开 API
+     * {@code player.level().getServer()} 即可，稳定且无需反射。
      */
-    @org.jetbrains.annotations.Nullable
-    private static MinecraftServer resolveServer(@org.jetbrains.annotations.NotNull Object listener) {
+    @Nullable
+    private static MinecraftServer resolveServer(@NotNull ServerPlayer player) {
         try {
-            Class<?> current = ServerGamePacketListenerImpl.class;
-            while (current != null && current != Object.class) {
-                for (Field declared : current.getDeclaredFields()) {
-                    if (declared.getType().equals(MinecraftServer.class)) {
-                        try {
-                            declared.setAccessible(true);
-                            Object value = declared.get(listener);
-                            return value instanceof MinecraftServer ms ? ms : null;
-                        } catch (Throwable ignored) {
-                            // 继续找
-                        }
-                    }
-                }
-                current = current.getSuperclass();
-            }
-            return null;
+            return player.level().getServer();
         } catch (Throwable t) {
             return null;
         }
     }
 
-    /** 在类及其父类中查找类型为 ServerPlayer 的第一个字段。 */
-    @org.jetbrains.annotations.NotNull
+    /** 在本类及其父类中查找类型为 ServerPlayer 的第一个字段。 */
+    @Nullable
     private static Field lookupPlayerField() {
         Class<?> current = ServerGamePacketListenerImpl.class;
         while (current != null && current != Object.class) {
@@ -178,6 +176,6 @@ public class ChatMixin {
             }
             current = current.getSuperclass();
         }
-        return NOT_FOUND;
+        return null;
     }
 }
