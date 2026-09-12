@@ -29,6 +29,27 @@ Minecraft **26.2** + Fabric + Carpet 的附属模组。让 AI 通过 Carpet 命�
 
 ---
 
+## 安全模型（必读）
+
+本模组会执行来自**不可信来源**的命令 —— AI 模型的回复，以及玩家录制后可能被他人回放的任务。
+因此防提权是核心设计，共四道防线：
+
+| 防线 | 位置 | 作用 |
+|---|---|---|
+| 永久黑名单 | `PermissionGuard.FORBIDDEN_ROOTS` | `op`/`ban`/`stop`/`fill` 等永不放行 |
+| 命令白名单 | `PermissionGuard.ALLOWED_ROOTS` | 默认只允许 `player` 等假人/只读命令 |
+| **权限降权** | `PermissionGuard.clamp` | 把命令源压到**任务开启者**的等级再派发 |
+| 操作审计 | `Auditor` | 记录每条命令的处置结果，可事后追溯 |
+
+> ⚠️ **降权这道防线以前是失效的**：`clamp()` 曾因「26.1 后找不到构造权限集的 API」
+> 而直接 `return source`（原样返回 OP 命令源）。26.2 的正确写法是
+> `source.withPermission(LevelBasedPermissionSet.forLevel(PermissionLevel.byId(level)))`，
+> 现已修复。若再次遇到权限 API 变动，`clamp()` 会退回 `NO_PERMISSIONS`
+> （宁可命令因权限不足失败，也绝不静默放行）。
+
+**审计日志**记录：游戏刻、命令（脱敏）、权限等级、来源（AI/回放/调度）、处置结果。
+`ai` 开头的命令只记录长度不记录原文 —— 因为 `/carpet ai api set ...` 会携带 API 密钥。
+
 ## 已实现的命令
 
 ```
@@ -40,6 +61,7 @@ Minecraft **26.2** + Fabric + Carpet 的附属模组。让 AI 通过 Carpet 命�
 /carpet ai api clear                           清除我的配置
 /carpet ai api list                            列出所有已配置玩家（需权限 2）
 /carpet ai perm                                查看 AI 可执行命令范围
+/carpet ai audit [条数]                        查看命令审计日志（需权限 2）
 ```
 
 ### 任务录制与回放

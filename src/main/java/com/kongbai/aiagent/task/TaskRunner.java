@@ -1,6 +1,7 @@
 package com.kongbai.aiagent.task;
 
 import com.kongbai.aiagent.machine.FakePlayerNaming;
+import com.kongbai.aiagent.util.Auditor;
 import com.kongbai.aiagent.util.PermissionGuard;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -249,12 +250,13 @@ public final class TaskRunner {
                 if (action.tickOffset() > elapsed) {
                     break; // 还没到时间
                 }
-                execute(action, sink, probe, messages);
+                execute(currentTick, action, sink, probe, messages);
                 cursor++;
             }
         }
 
-        private void execute(@NotNull RecordedAction action, @NotNull CommandSink sink,
+        private void execute(long currentTick, @NotNull RecordedAction action,
+                             @NotNull CommandSink sink,
                              @Nullable BlockProbe probe, @NotNull List<String> messages) {
             switch (action.type()) {
                 case MOVE -> {
@@ -263,14 +265,14 @@ public final class TaskRunner {
                             action.x(), action.y(), action.z())
                             : String.format(Locale.ROOT, "player %s tp %.3f %.3f %.3f",
                             fakeName, action.x(), action.y(), action.z());
-                    dispatch(cmd, "移动", sink, messages);
+                    dispatch(currentTick, cmd, "移动", sink, messages);
                 }
                 case LOOK -> {
                     String cmd = fakeName == null
                             ? String.format(Locale.ROOT, "tp %s %.1f %.1f", "@s", action.yaw(), action.pitch())
                             : String.format(Locale.ROOT, "player %s look %.1f %.1f",
                             fakeName, action.yaw(), action.pitch());
-                    dispatch(cmd, "视角", sink, messages);
+                    dispatch(currentTick, cmd, "视角", sink, messages);
                 }
                 case COMMAND -> {
                     String raw = action.command();
@@ -282,13 +284,15 @@ public final class TaskRunner {
                     if (reason != null) {
                         messages.add("§c已拦截任务「" + task.name() + "」中的命令 /"
                                 + PermissionGuard.rootOf(raw) + "：" + reason);
+                        Auditor.getInstance().record(currentTick, null, task.permLevel(), raw,
+                                Auditor.Result.BLOCKED, Auditor.Source.PLAYBACK, reason);
                         return;
                     }
                     // 方块状态检测：判断这活儿是不是已经干过了
                     if (!shouldExecuteByState(action, probe, messages)) {
                         return;
                     }
-                    dispatch(raw, "命令", sink, messages);
+                    dispatch(currentTick, raw, "命令", sink, messages);
                 }
             }
         }
@@ -393,11 +397,13 @@ public final class TaskRunner {
          * {@code tp} 与 {@code player} 都在白名单内，因此正常情况下会放行；
          * 这样统一了校验路径，避免以后有人给 {@code tp} 加限制时漏掉这里。
          */
-        private void dispatch(@NotNull String command, @NotNull String label,
+        private void dispatch(long currentTick, @NotNull String command, @NotNull String label,
                               @NotNull CommandSink sink, @NotNull List<String> messages) {
             String reason = PermissionGuard.check(command);
             if (reason != null) {
                 messages.add("§c" + label + "被拦截：" + reason);
+                Auditor.getInstance().record(currentTick, null, task.permLevel(), command,
+                        Auditor.Result.BLOCKED, Auditor.Source.PLAYBACK, reason);
                 return;
             }
             boolean ok = sink.execute(command, task.permLevel());

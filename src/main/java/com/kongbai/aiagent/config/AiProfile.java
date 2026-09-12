@@ -222,7 +222,13 @@ public final class AiProfile {
     /** 补全后的 chat 接口地址。调用方无需关心用户填的地址是否带 /v1。 */
     @NotNull
     public String chatEndpoint() {
-        return baseUrl + "/chat/completions";
+        String base = baseUrl;
+        // 用户常填成 ".../v1/"（带尾斜杠），直接拼接会得到 ".../v1//chat/completions"。
+        // 虽然多数服务端能容忍，但严格来说不是同一个路径，这里统一去掉。
+        while (base.endsWith("/")) {
+            base = base.substring(0, base.length() - 1);
+        }
+        return base + "/chat/completions";
     }
 
     // ---------- 序列化 ----------

@@ -15,6 +15,8 @@ import com.kongbai.aiagent.task.Scheduler;
 import com.kongbai.aiagent.task.TaskRecorder;
 import com.kongbai.aiagent.task.TaskRegistry;
 import com.kongbai.aiagent.task.TaskRunner;
+import com.kongbai.aiagent.util.Auditor;
+import com.kongbai.aiagent.util.PermissionGuard;
 import com.mojang.brigadier.CommandDispatcher;
 import net.fabricmc.api.ModInitializer;
 import net.minecraft.commands.CommandBuildContext;
@@ -127,6 +129,7 @@ public class AiAgentMod implements ModInitializer {
             TaskRunner.getInstance().stopAll();
             Scheduler.getInstance().stopAll();
             AgentService.getInstance().shutdown();
+            Auditor.getInstance().clear();
             LOGGER.info("[假人智能] 已卸载并保存全部数据");
         }
 
@@ -157,11 +160,11 @@ public class AiAgentMod implements ModInitializer {
                 sampleRecorders(server, recorders, tick);
             }
             if (runner.hasActive()) {
-                List<String> messages = runner.tick(tick, createSink(server), createProbe(server));
+                List<String> messages = runner.tick(tick, createSink(server, Auditor.Source.PLAYBACK), createProbe(server));
                 broadcast(server, messages);
             }
             if (scheduler.hasActive()) {
-                List<String> messages = scheduler.tick(tick, createSink(server));
+                List<String> messages = scheduler.tick(tick, createSink(server, Auditor.Source.SCHEDULER));
                 broadcast(server, messages);
             }
         }
@@ -247,14 +250,25 @@ public class AiAgentMod implements ModInitializer {
          * Minecraft 自身的权限校验仍会兜住。
          */
         @NotNull
-        private CommandSink createSink(@NotNull MinecraftServer server) {
+        private CommandSink createSink(@NotNull MinecraftServer server,
+                                       @NotNull Auditor.Source source) {
             return (command, permLevel) -> {
+                long tick = server.getTickCount();
                 try {
-                    CommandSourceStack source = server.createCommandSourceStack();
-                    server.getCommands().performPrefixedCommand(source, command);
+                    CommandSourceStack stack = server.createCommandSourceStack();
+                    // 关键：必须降权。server.createCommandSourceStack() 给的是服务器自身
+                    // （OWNER / 等级 4）权限，若直接派发，任何玩家录制的任务、乃至 AI
+                    // 生成的命令都会以 OP 身份执行 —— 这就是提权漏洞。
+                    // 这里压到任务创建者的等级，白名单之外再由 Brigadier 自己兜住。
+                    stack = PermissionGuard.clamp(stack, permLevel);
+                    server.getCommands().performPrefixedCommand(stack, command);
+                    Auditor.getInstance().record(tick, null, permLevel, command,
+                            Auditor.Result.EXECUTED, source, null);
                     return true;
                 } catch (Throwable t) {
                     LOGGER.warn("[假人智能] 命令执行失败 /{} : {}", command, t.getMessage());
+                    Auditor.getInstance().record(tick, null, permLevel, command,
+                            Auditor.Result.FAILED, source, t.getMessage());
                     return false;
                 }
             };

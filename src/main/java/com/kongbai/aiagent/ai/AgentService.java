@@ -7,6 +7,7 @@ import com.kongbai.aiagent.machine.MachineRegistry;
 import com.kongbai.aiagent.task.CommandSink;
 import com.kongbai.aiagent.task.Scheduler;
 import com.kongbai.aiagent.task.TaskRegistry;
+import com.kongbai.aiagent.util.Auditor;
 import com.kongbai.aiagent.util.PermissionGuard;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -175,6 +176,8 @@ public final class AgentService {
                     blockReason.append(reason);
                 }
                 LOGGER.warn("[ai-agent] 已拦截 AI 命令 /{} : {}", PermissionGuard.rootOf(command), reason);
+                Auditor.getInstance().record(startTick, null, permLevel, command,
+                        Auditor.Result.BLOCKED, Auditor.Source.AI, reason);
                 continue;
             }
             if (sink == null) {

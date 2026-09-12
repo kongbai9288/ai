@@ -2,6 +2,9 @@ package com.kongbai.aiagent.util;
 
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.server.permissions.LevelBasedPermissionSet;
+import net.minecraft.server.permissions.PermissionLevel;
+import net.minecraft.server.permissions.PermissionSet;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -179,14 +182,19 @@ public final class PermissionGuard {
      */
     @NotNull
     public static CommandSourceStack clamp(@NotNull CommandSourceStack source, int permLevel) {
-        // 26.1 起权限系统重构：CommandSourceStack.withPermission(int) 已改为
-        // withPermission(PermissionSet)，构造 PermissionSet 的公开工厂尚不明确，
-        // 因此这里不再做「降权」变换，直接返回原 source。
-        //
-        // 这不意味着防提权失效：真正兜住风险的是本类的白名单 + 永久黑名单
-        // （见 check()），它们不依赖任何权限 API。
-        // 待 26.2 的 PermissionSet 构造方式确认后再补上升降权。
-        return source;
+        int level = Math.max(0, Math.min(4, permLevel));
+        try {
+            // 26.1 起：withPermission(int) 改为 withPermission(PermissionSet)。
+            // 「按等级构造权限集」的工厂是 LevelBasedPermissionSet.forLevel(PermissionLevel)，
+            // PermissionLevel.byId 接受 0-4（ALL / MODERATORS / GAMEMASTERS / ADMINS / OWNERS）。
+            PermissionSet downgraded =
+                    LevelBasedPermissionSet.forLevel(PermissionLevel.byId(level));
+            return source.withPermission(downgraded);
+        } catch (Throwable t) {
+            // 权限 API 若再变动，绝不静默放行：退回最低权限集，
+            // 宁可命令因权限不足失败，也不能以 OP 身份执行不可信输入。
+            return source.withPermission(PermissionSet.NO_PERMISSIONS);
+        }
     }
 
     /**
@@ -201,16 +209,27 @@ public final class PermissionGuard {
      */
     public static int levelOf(@NotNull CommandSourceStack source) {
         try {
-            if (Commands.hasPermission(Commands.LEVEL_OWNERS).test(source)) {
+            PermissionSet set = source.permissions();
+            if (set == null) {
+                return 0;
+            }
+            // 最快路径：基于等级的权限集可直接读出等级
+            if (set instanceof LevelBasedPermissionSet levelBased) {
+                return levelBased.level().id();
+            }
+            // 其它实现：用 PermissionCheck 直接对权限集判定
+            // （注意不是 Commands.hasPermission(...).test(source) ——
+            //  CommandSourceStack 并不实现 PermissionSetSupplier，那样写编译不过）
+            if (Commands.LEVEL_OWNERS.check(set)) {
                 return 4;
             }
-            if (Commands.hasPermission(Commands.LEVEL_ADMINS).test(source)) {
+            if (Commands.LEVEL_ADMINS.check(set)) {
                 return 3;
             }
-            if (Commands.hasPermission(Commands.LEVEL_GAMEMASTERS).test(source)) {
+            if (Commands.LEVEL_GAMEMASTERS.check(set)) {
                 return 2;
             }
-            if (Commands.hasPermission(Commands.LEVEL_MODERATORS).test(source)) {
+            if (Commands.LEVEL_MODERATORS.check(set)) {
                 return 1;
             }
             return 0;

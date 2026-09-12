@@ -12,6 +12,7 @@ import com.kongbai.aiagent.task.Scheduler;
 import com.kongbai.aiagent.task.TaskRecorder;
 import com.kongbai.aiagent.task.TaskRegistry;
 import com.kongbai.aiagent.task.TaskRunner;
+import com.kongbai.aiagent.util.Auditor;
 import com.kongbai.aiagent.util.PermissionGuard;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.FloatArgumentType;
@@ -85,6 +86,12 @@ public final class AiCommand {
                 .then(buildSchedNode())
                 .then(buildBotNode())
                 .then(buildEndNode())
+                .then(Commands.literal("audit")
+                        .requires(src -> PermissionGuard.levelOf(src) >= PERM_VIEW_OTHERS)
+                        .executes(ctx -> showAudit(ctx.getSource(), 10))
+                        .then(Commands.argument("count", IntegerArgumentType.integer(1, 100))
+                                .executes(ctx -> showAudit(ctx.getSource(),
+                                        IntegerArgumentType.getInteger(ctx, "count")))))
                 .then(Commands.literal("perm")
                         .executes(ctx -> showPermissions(ctx.getSource())));
 
@@ -381,6 +388,7 @@ public final class AiCommand {
         send(source, "§8— 其他 —");
         send(source, "§7/carpet ai end confirm §f执行所有任务（等价 run all）");
         send(source, "§7/carpet ai perm §f查看 AI 可执行命令范围");
+        send(source, "§7/carpet ai audit [条数] §f查看命令审计日志（需权限 2）");
         return 1;
     }
 
@@ -1260,6 +1268,33 @@ public final class AiCommand {
         send(source, "§7单次最多 §f" + PermissionGuard.MAX_COMMANDS_PER_RESPONSE + " §7条命令，每条上限 §f"
                 + PermissionGuard.MAX_COMMAND_LENGTH + " §7字符");
         send(source, "§7所有命令均以「任务开启者」的权限等级执行，无法提权");
+        return 1;
+    }
+
+    /**
+     * 查看命令审计日志。
+     *
+     * <p>这是安全的「事后眼」：AI 回复与任务回放都是不可信输入，
+     * 管理员需要能回溯「到底执行过什么、拦过什么」。
+     *
+     * <p>展示的是<b>脱敏后</b>的命令 —— {@code /carpet ai api set} 这类
+     * 可能携带密钥的命令只显示长度，不显示原文（见 {@link Auditor#redact}）。
+     */
+    private static int showAudit(@NotNull CommandSourceStack source, int count) {
+        Auditor auditor = Auditor.getInstance();
+        send(source, "§6命令审计 §7" + auditor.summary());
+        List<Auditor.Entry> entries = auditor.recent(count);
+        if (entries.isEmpty()) {
+            send(source, "§7暂无记录");
+            return 1;
+        }
+        send(source, "§8最近 " + entries.size() + " 条（最新在后）:");
+        for (Auditor.Entry entry : entries) {
+            if (entry == null) {
+                continue;
+            }
+            send(source, Auditor.format(entry));
+        }
         return 1;
     }
 
