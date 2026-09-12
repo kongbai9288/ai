@@ -158,7 +158,12 @@ public final class AiCommand {
                                 .executes(ctx -> policyRemove(ctx.getSource(),
                                         StringArgumentType.getString(ctx, "root")))))
                 .then(Commands.literal("reset")
-                        .executes(ctx -> policyReset(ctx.getSource())));
+                        .executes(ctx -> policyReset(ctx.getSource())))
+                .then(Commands.literal("botprefix")
+                        .executes(ctx -> showBotPrefix(ctx.getSource()))
+                        .then(Commands.argument("prefix", StringArgumentType.word())
+                                .executes(ctx -> setBotPrefix(ctx.getSource(),
+                                        StringArgumentType.getString(ctx, "prefix")))));
     }
 
     @NotNull
@@ -1206,7 +1211,7 @@ public final class AiCommand {
      */
     private static int botInfo(@NotNull CommandSourceStack source, String ignored) {
         send(source, "§6假人命名规则");
-        send(source, "§7所有假人名自动加前缀 §f" + FakePlayerNaming.PREFIX + "§7，例如输入 "
+        send(source, "§7所有假人名自动加前缀 §f" + FakePlayerNaming.prefix() + "§7，例如输入 "
                 + "§fbot1 §7→ §f" + FakePlayerNaming.normalize("bot1"));
         send(source, "§7带前缀后不会误操作服务器里其他人已有的假人");
         send(source, "§7同名假人会复用已召唤的那个，不新建存档数据（减少存储占用）");
@@ -1215,9 +1220,9 @@ public final class AiCommand {
     }
 
     private static int botList(@NotNull CommandSourceStack source) {
-        send(source, "§6本模组管理的假人（前缀 " + FakePlayerNaming.PREFIX + "）");
+        send(source, "§6本模组管理的假人（前缀 " + FakePlayerNaming.prefix() + "）");
         send(source, "§7执行 §f/player list §7可查看服务器上全部假人");
-        send(source, "§7本模组只操作带 §f" + FakePlayerNaming.PREFIX + " §7前缀的，不会碰其他假人");
+        send(source, "§7本模组只操作带 §f" + FakePlayerNaming.prefix() + " §7前缀的，不会碰其他假人");
         return 1;
     }
 
@@ -1401,6 +1406,34 @@ public final class AiCommand {
             return 0;
         }
         send(source, "§a已移除 §f" + root + " §7的自定义规则（回到默认）");
+        return 1;
+    }
+
+    /**
+     * 显示当前假人名前缀。
+     *
+     * <p>用于排查「服务端给假人名强制加了别的前缀」导致功能失效的情况 ——
+     * 例如实体实际叫 {@code bot_ai_01}，而前缀还是默认的 {@code ai_}。
+     */
+    private static int showBotPrefix(@NotNull CommandSourceStack source) {
+        send(source, "§6当前假人名前缀: §f" + FakePlayerNaming.prefix());
+        send(source, "§7修改: §f/carpet ai policy botprefix <前缀>");
+        send(source, "§7若服务端会额外叠前缀（如 ai_01 -> bot_ai_01），"
+                + "把这里设成最终形式即可（如 bot_ai_）");
+        return 1;
+    }
+
+    private static int setBotPrefix(@NotNull CommandSourceStack source, @NotNull String prefix) {
+        String error = PermissionPolicy.getInstance().setBotPrefix(prefix);
+        if (error != null) {
+            sendError(source, error);
+            return 0;
+        }
+        send(source, "§a假人名前缀已设为 §f" + FakePlayerNaming.prefix());
+        send(source, "§7只影响之后召唤的假人；已在线的假人不受影响");
+        if (!PermissionPolicy.getInstance().isAttached()) {
+            send(source, "§6策略系统未挂载，重启世界后会丢失该设置");
+        }
         return 1;
     }
 

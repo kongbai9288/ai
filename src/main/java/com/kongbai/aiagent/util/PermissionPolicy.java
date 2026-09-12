@@ -67,6 +67,16 @@ public final class PermissionPolicy {
     /** 服主额外禁用的命令根（优先级高于内置白名单）。 */
     private final Set<String> extraDenied = ConcurrentHashMap.newKeySet();
 
+    /**
+     * 假人名前缀（持久化）。
+     *
+     * <p>服主可用 {@code /carpet ai botprefix <前缀>} 修改，
+     * 用于适配「服务端/其他模组会给假人名强制叠加前缀」的环境
+     *（例如实体最终叫 {@code bot_ai_01} 而非 {@code ai_01}）。
+     */
+    @NotNull
+    private volatile String botPrefix = com.kongbai.aiagent.machine.FakePlayerNaming.PREFIX;
+
     @Nullable
     private volatile Path saveDir;
 
@@ -124,6 +134,29 @@ public final class PermissionPolicy {
 
     public int size() {
         return extraAllowed.size() + extraDenied.size();
+    }
+
+    @NotNull
+    public String botPrefix() {
+        return botPrefix;
+    }
+
+    /**
+     * 修改假人名前缀。校验交给 {@code FakePlayerNaming#setPrefix}（限制字符集，防命令注入）。
+     *
+     * @return 成功返回 {@code null}；否则返回失败原因
+     */
+    @Nullable
+    public String setBotPrefix(@Nullable String prefix) {
+        String error = com.kongbai.aiagent.machine.FakePlayerNaming.setPrefix(prefix);
+        if (error != null) {
+            return error;
+        }
+        botPrefix = com.kongbai.aiagent.machine.FakePlayerNaming.prefix();
+        Auditor.getInstance().record(0L, null, 0, "botprefix " + botPrefix,
+                Auditor.Result.EXECUTED, Auditor.Source.POLICY, null);
+        save();
+        return null;
     }
 
     // ---------- 修改 ----------
@@ -255,6 +288,7 @@ public final class PermissionPolicy {
             root.addProperty("version", 1);
             root.add("allow", toArray(extraAllowed));
             root.add("deny", toArray(extraDenied));
+            root.addProperty("botPrefix", botPrefix);
             return JsonUtil.writeTree(policyFile(), root);
         } catch (IllegalStateException e) {
             return false;
@@ -276,6 +310,17 @@ public final class PermissionPolicy {
         int denied = readInto(root, "deny", extraDenied);
         if (allowed + denied > 0) {
             LOGGER.info("[ai-agent] 已加载命令策略：额外放行 {} 条、额外禁用 {} 条", allowed, denied);
+        }
+        // 恢复假人名前缀（并同步到 FakePlayerNaming）
+        String saved = JsonUtil.stringOr(root, "", "botPrefix");
+        if (!saved.isEmpty()) {
+            String error = com.kongbai.aiagent.machine.FakePlayerNaming.setPrefix(saved);
+            if (error == null) {
+                botPrefix = com.kongbai.aiagent.machine.FakePlayerNaming.prefix();
+                LOGGER.info("[ai-agent] 已恢复假人名前缀: {}", botPrefix);
+            } else {
+                LOGGER.warn("[ai-agent] 存档中的假人名前缀非法，已忽略: {}", saved);
+            }
         }
     }
 

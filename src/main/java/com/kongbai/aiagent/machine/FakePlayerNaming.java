@@ -36,7 +36,19 @@ public final class FakePlayerNaming {
      * 旧注释提到的 {@code /player ai_* kill} 实际不存在，别照着写。
      * 前缀的作用是「一眼看出这是本模组的假人」，批量清理需自行遍历名单。
      */
+    /** 默认前缀。服主可通过 {@code /carpet ai botprefix} 修改。 */
     public static final String PREFIX = "ai_";
+
+    /**
+     * 当前生效的前缀（可配置，默认 {@link #PREFIX}）。
+     *
+     * <p><b>为什么前缀要可配置</b>：有些服务端 / 其他模组会给假人名<b>强制叠加自己的前缀</b>。
+     * 例如本模组生成 {@code ai_01}，服务端统一加 {@code bot_}，最终实体名叫 {@code bot_ai_01} ——
+     * 此时若还按「必须以 {@code ai_} 开头」判定，归属检查会全部失败，功能直接瘫痪。
+     *
+     * <p>服主可把前缀改成实际生效的完整形式（如 {@code bot_ai_}）。
+     */
+    private static volatile String activePrefix = PREFIX;
 
     /** 假人名最大长度。Minecraft 玩家名上限 16，减去前缀留足余量。 */
     public static final int MAX_LENGTH = 16;
@@ -45,6 +57,35 @@ public final class FakePlayerNaming {
     private static final Pattern VALID_NAME = Pattern.compile("^[A-Za-z][A-Za-z0-9_]*$");
 
     private FakePlayerNaming() {
+    }
+
+    /** 当前生效的前缀。 */
+    @NotNull
+    public static String prefix() {
+        return activePrefix;
+    }
+
+    /**
+     * 修改前缀。
+     *
+     * <p><b>只允许包含安全字符且不能为空</b> —— 前缀会被拼进命令，
+     * 含空格或分号会破坏命令结构（甚至造成命令注入）。
+     *
+     * @return 成功返回 {@code null}；否则返回失败原因
+     */
+    @Nullable
+    public static String setPrefix(@Nullable String prefix) {
+        if (prefix == null) {
+            return "前缀不能为空";
+        }
+        String trimmed = prefix.trim();
+        // 前缀会被直接拼进 /player <名> ... 命令，必须限制字符集
+        if (trimmed.isEmpty() || trimmed.length() > 12
+                || !trimmed.matches("^[A-Za-z0-9_-]+$")) {
+            return "前缀不合法（仅允许字母/数字/下划线/连字符，1-12 字符）";
+        }
+        activePrefix = trimmed;
+        return null;
     }
 
     /**
@@ -68,8 +109,9 @@ public final class FakePlayerNaming {
             return null;
         }
         // 已经是带前缀的（大小写不敏感），不重复加
-        if (trimmed.toLowerCase(Locale.ROOT).startsWith(PREFIX)) {
-            trimmed = trimmed.substring(PREFIX.length());
+        String prefix = activePrefix;
+        if (trimmed.toLowerCase(Locale.ROOT).startsWith(prefix.toLowerCase(Locale.ROOT))) {
+            trimmed = trimmed.substring(prefix.length());
         }
         // 清洗：只保留字母数字下划线
         StringBuilder cleaned = new StringBuilder();
@@ -89,11 +131,11 @@ public final class FakePlayerNaming {
             body = "b" + body;
         }
         // 截断：总长不超过 MAX_LENGTH
-        int maxBody = MAX_LENGTH - PREFIX.length();
+        int maxBody = MAX_LENGTH - prefix.length();
         if (body.length() > maxBody) {
             body = body.substring(0, maxBody);
         }
-        return PREFIX + body;
+        return prefix + body;
     }
 
     /**
@@ -108,10 +150,10 @@ public final class FakePlayerNaming {
     @NotNull
     public static String forPurpose(@Nullable String purpose) {
         if (purpose == null || purpose.isBlank()) {
-            return PREFIX + "default";
+            return prefix() + "default";
         }
         String normalized = normalize(purpose);
-        return normalized == null ? PREFIX + "default" : normalized;
+        return normalized == null ? prefix() + "default" : normalized;
     }
 
     /**
@@ -123,7 +165,17 @@ public final class FakePlayerNaming {
         if (name == null) {
             return false;
         }
-        return name.toLowerCase(Locale.ROOT).startsWith(PREFIX);
+        String lower = name.toLowerCase(Locale.ROOT);
+        String prefix = activePrefix.toLowerCase(Locale.ROOT);
+        // 先按「以我们的前缀开头」判断（正常情况）
+        if (lower.startsWith(prefix)) {
+            return true;
+        }
+        // 兜底：服务端/其他模组可能在我们的名字前又叠了一层前缀，
+        // 例如 ai_01 -> bot_ai_01。此时 startsWith 会失败但名字仍是我们的。
+        // 用 contains 兜底，避免这种情况下功能整体瘫痪。
+        // （代价：形如 notai_bot 的名字会被误判为本模组的，实际中极罕见）
+        return lower.contains(prefix);
     }
 
     /**
@@ -136,8 +188,9 @@ public final class FakePlayerNaming {
         if (name == null) {
             return "";
         }
-        if (name.toLowerCase(Locale.ROOT).startsWith(PREFIX)) {
-            return name.substring(PREFIX.length());
+        String prefix = activePrefix;
+        if (name.toLowerCase(Locale.ROOT).startsWith(prefix.toLowerCase(Locale.ROOT))) {
+            return name.substring(prefix.length());
         }
         return name;
     }
@@ -194,6 +247,52 @@ public final class FakePlayerNaming {
     public static String spawnAtCommand(@NotNull String fakeName, double x, double y, double z) {
         return String.format(java.util.Locale.ROOT,
                 "player %s spawn at %.3f %.3f %.3f", fakeName, x, y, z);
+    }
+
+    /**
+     * 生成「在指定坐标 + 指定维度召唤假人」的命令。
+     *
+     * <p>Carpet 语法（已核对）：
+     * {@code /player <name> spawn at <X> <Y> <Z> facing <yaw> <pitch> in <dimension> in <gamemode>}
+     *
+     * <p><b>为什么必须带坐标</b>：不带 {@code at} 时假人生成在<b>执行者</b>位置。
+     * 本模组的投递器是服务器级 source（没有实体），落点会变成<b>世界出生点</b> ——
+     * 一旦出生点被改造过（基岩被挖穿、填了岩浆、封在方块里），
+     * 假人会直接掉进虚空/被烧死/卡死，后续命令全部落空。
+     * 显式指定录制时的坐标可完全避开这个问题。
+     */
+    @NotNull
+    public static String spawnAtCommand(@NotNull String fakeName,
+                                        double x, double y, double z,
+                                        @Nullable String dimension) {
+        if (dimension == null || dimension.isBlank()) {
+            return spawnAtCommand(fakeName, x, y, z);
+        }
+        return String.format(java.util.Locale.ROOT,
+                "player %s spawn at %.3f %.3f %.3f in %s", fakeName, x, y, z, dimension.trim());
+    }
+
+    /**
+     * 生成「给假人加保护」的命令序列（抗怪物干扰）。
+     *
+     * <p><b>为什么需要</b>：假人是真实的玩家实体，会被怪物攻击、被推动、
+     * 会摔伤、会饿。回放一个几十秒的任务期间被僵尸推歪几格，
+     * 后续所有「对着某个方块 use」就全部打偏了。
+     *
+     * <p>这里给高等级抗性提升 + 饱和（回血防饿死），
+     * 既不改变世界，又能让假人在回放期间稳定存活。
+     * 抗性 255 级基本等于无敌，饱和解决饥饿掉血。
+     *
+     * <p><b>刻意不设为创造模式</b>：部分机械（如刷石机、农作物交互）
+     * 在创造模式下的行为与生存不同，会改变录制时的效果。
+     */
+    @NotNull
+    public static java.util.List<String> protectionCommands(@NotNull String fakeName) {
+        return java.util.List.of(
+                "effect give " + fakeName + " minecraft:resistance 1728000 255 true",
+                "effect give " + fakeName + " minecraft:saturation 1728000 255 true",
+                "effect give " + fakeName + " minecraft:fire_resistance 1728000 255 true"
+        );
     }
 
     /**

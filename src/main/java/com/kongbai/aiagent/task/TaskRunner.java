@@ -45,6 +45,26 @@ public final class TaskRunner {
 
     /** 同时进行的回放实例上限，防止玩家一次性触发几百个回放拖垮 tick。 */
     public static final int MAX_CONCURRENT = 32;
+    /**
+     * 召唤后等待的游戏刻数。
+     *
+     * <p><b>为什么必须等</b>：Carpet 的假人创建是<b>异步</b>的 ——
+     * 它要先去 Mojang 解析 GameProfile（查皮肤/UUID），
+     * 官方文档明确写了 "Profile resolution is async; name is marked as spawning during fetch"。
+     * 在这段窗口内假人还不存在，任何 {@code /player X use} 都会失败。
+     * 实测需要几刻才能就绪，这里留 5 刻余量。
+     */
+    public static final long SPAWN_WARMUP_TICKS = 5L;
+
+    /**
+     * 保活 / 复活检测间隔（刻）。
+     *
+     * <p><b>为什么需要</b>：Carpet 原生的假人死亡后会直接掉线（不是重生），
+     * 此后的所有命令都会「目标不存在」而静默失败 —— 回放看起来在跑，实则空转。
+     * 定期重发一次 spawn 即可：假人还在就复用（Carpet 行为），不在就重新召唤。
+     */
+    public static final long KEEPALIVE_CHECK_TICKS = 100L;
+
 
     private static final TaskRunner INSTANCE = new TaskRunner();
 
@@ -299,8 +319,19 @@ public final class TaskRunner {
         private int cursor;
         /** 本回放发送过"检测中"提示，避免每个动作都刷屏。 */
         private boolean probeNotified;
-        /** 是否已发出过召唤命令（只需一次，之后 Carpet 会复用该假人）。 */
+        /** 是否已发出过召唤命令。 */
         private boolean spawned;
+        /** spawn 就绪前的等待截止刻（见 {@link #SPAWN_WARMUP_TICKS}）。 */
+        private long warmupUntilTick = -1L;
+        /** 上次保活/复活检测的刻。 */
+        private long lastKeepaliveTick = -1L;
+        /** 是否在等待 spawn 就绪后再补发保护效果。 */
+        private boolean pendingProtection;
+        /** 安全出生点（取自任务的第一个移动动作）。 */
+        private final double spawnX;
+        private final double spawnY;
+        private final double spawnZ;
+        private final boolean hasSpawnPos;
 
         Playback(long id, @NotNull RecordedTask task, @Nullable String fakeName,
                  long startTick, boolean force, int effectivePermLevel,
@@ -312,6 +343,47 @@ public final class TaskRunner {
             this.force = force;
             this.effectivePermLevel = Math.max(0, Math.min(4, effectivePermLevel));
             this.executorName = executorName;
+            double[] pos = firstMovePosition(task);
+            if (pos != null) {
+                this.spawnX = pos[0];
+                this.spawnY = pos[1];
+                this.spawnZ = pos[2];
+                this.hasSpawnPos = true;
+            } else {
+                this.spawnX = this.spawnY = this.spawnZ = 0.0;
+                this.hasSpawnPos = false;
+            }
+        }
+
+        /**
+         * 取任务里第一个移动动作的坐标，作为假人的安全出生点。
+         *
+         * <p><b>为什么用它而不是世界出生点</b>：见 {@code FakePlayerNaming#spawnAtCommand} ——
+         * 出生点可能被改造过（基岩挖穿 / 填岩浆 / 封死），
+         * 用录制时的实际坐标最贴近任务场景，也最安全。
+         */
+        @Nullable
+        private static double[] firstMovePosition(@NotNull RecordedTask task) {
+            for (RecordedAction action : task.actions()) {
+                if (action != null && action.type() == RecordedAction.Type.MOVE) {
+                    return new double[]{action.x(), action.y(), action.z()};
+                }
+            }
+            return null;
+        }
+
+        /**
+         * 生成召唤命令。
+         *
+         * <p>优先用安全坐标（避免落在被破坏的世界出生点）；
+         * 任务里没有移动动作时才退回无坐标版本。
+         */
+        @NotNull
+        private String spawnCommand() {
+            if (hasSpawnPos) {
+                return FakePlayerNaming.spawnAtCommand(fakeName, spawnX, spawnY, spawnZ);
+            }
+            return FakePlayerNaming.spawnCommand(fakeName);
         }
 
         boolean isDone() {
@@ -329,11 +401,43 @@ public final class TaskRunner {
             if (isDone()) {
                 return;
             }
-            // 驱动假人时先确保假人存在 —— 缺了这一步，后续所有
-            // /player <假人> ... 都会因目标不存在而失败，回放看着在跑实则全是空转。
-            if (fakeName != null && !spawned) {
-                spawned = true;
-                sink.execute(FakePlayerNaming.spawnCommand(fakeName), effectivePermLevel);
+            // ── 假人保障流程 ──
+            // 目标：确保回放期间「假人一直存在、且站在正确的位置、且活着」。
+            // 缺任何一环，后续命令都会静默失败，回放看着在跑实则空转。
+            if (fakeName != null) {
+                if (!spawned) {
+                    // 首次召唤：用安全坐标（避开可能被破坏的世界出生点）
+                    spawned = true;
+                    sink.execute(spawnCommand(), effectivePermLevel);
+                    pendingProtection = true;
+                    warmupUntilTick = currentTick + SPAWN_WARMUP_TICKS;
+                    lastKeepaliveTick = currentTick;
+                    return; // 等异步 spawn 就绪后再开始执行动作
+                }
+                if (currentTick < warmupUntilTick) {
+                    return; // Carpet 的假人创建是异步的，还没就绪
+                }
+                if (pendingProtection) {
+                    // spawn 已完成，补发保护（抗性/饱和/防火），防怪物与摔落干扰
+                    pendingProtection = false;
+                    for (String cmd : FakePlayerNaming.protectionCommands(fakeName)) {
+                        sink.execute(cmd, effectivePermLevel);
+                    }
+                    // 保护生效后再把假人精确放到出生点（重生动量可能让它偏移）
+                    if (hasSpawnPos) {
+                        sink.execute(FakePlayerNaming.teleportCommand(
+                                fakeName, spawnX, spawnY, spawnZ), effectivePermLevel);
+                    }
+                }
+                if (currentTick - lastKeepaliveTick >= KEEPALIVE_CHECK_TICKS) {
+                    // 定期保活：假人可能被怪物打死/掉虚空，Carpet 原生会直接掉线。
+                    // 重发 spawn —— 还在就复用，不在就复活。
+                    lastKeepaliveTick = currentTick;
+                    sink.execute(spawnCommand(), effectivePermLevel);
+                    warmupUntilTick = currentTick + SPAWN_WARMUP_TICKS;
+                    pendingProtection = true;
+                    return;
+                }
             }
             long elapsed = Math.max(0, currentTick - startTick);
             List<RecordedAction> actions = task.actions();

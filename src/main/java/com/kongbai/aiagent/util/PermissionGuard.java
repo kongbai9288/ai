@@ -228,7 +228,7 @@ public final class PermissionGuard {
         }
         String target = parts[1];
         if (!com.kongbai.aiagent.machine.FakePlayerNaming.isOurs(target)) {
-            return "/player 的目标必须是 " + com.kongbai.aiagent.machine.FakePlayerNaming.PREFIX
+            return "/player 的目标必须带 " + com.kongbai.aiagent.machine.FakePlayerNaming.prefix()
                     + " 前缀的假人（收到: " + target + "）"
                     + "—— 不允许操作他人假人或真实玩家";
         }
