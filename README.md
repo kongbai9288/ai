@@ -98,6 +98,36 @@ execute run op attacker    -> root=execute -> 白名单放行 ❌
 闸门原先只在各调用点校验，新调用点一旦漏校验，不可信命令就直达派发。
 现在 `AiAgentMod.createCommandSink` 内部也会过一次 `PermissionGuard`，任何路径都绕不开。
 
+### 命令策略：默认拒绝，服主手动开启
+
+**其他模组注册的命令，默认全部拒绝。** 本模组无法预判第三方命令的破坏力，
+放行等于把其他模组的权限体系也一起暴露给 AI。实测默认拦截：
+
+```
+home / rtp / warp / money / back / sethome / tpa / nick / fly ...
+→ 命令 /xxx 不在允许清单内（其他模组的命令默认拒绝）
+```
+
+服主确认安全后逐条开启（需要权限 3+，控制台权限 4 天然满足）：
+
+```
+/carpet ai policy                     查看当前策略
+/carpet ai policy allow <命令根>       额外放行（如 home）
+/carpet ai policy deny  <命令根>       额外禁用（可收紧内置白名单，如禁掉 give）
+/carpet ai policy remove <命令根>      移除自定义规则，回到默认
+/carpet ai policy reset               清空全部自定义规则
+```
+
+策略持久化在存档 `aiagent/aiagent_policy.json`。
+
+> ⚠️ **永久黑名单不可被 `allow` 覆盖** ——
+> `op` / `stop` / `fill` / `setblock` / `function` 等在 `FORBIDDEN_ROOTS` 里的命令，
+> 即使服主显式 `allow` 也会被拒绝。这是整个安全模型的底线，避免手滑撕开缺口。
+>
+> ⚠️ **策略绝不能被 AI 修改** —— 它是「闸门之上的闸门」。
+> `checkCarpet` 只放行 `carpet ai machine`，AI 调用 `carpet ai policy` 会被拦截；
+> 命令本身也要求权限等级 3+。否则 AI 一句 `policy allow op` 就能撕掉全部防线。
+
 ### HTTP 客户端
 
 | 风险 | 处理 |
@@ -132,6 +162,7 @@ execute run op attacker    -> root=execute -> 白名单放行 ❌
 /carpet ai api list                            列出所有已配置玩家（需权限 2）
 /carpet ai perm                                查看 AI 可执行命令范围
 /carpet ai audit [条数]                        查看命令审计日志（需权限 2）
+/carpet ai policy allow|deny <命令根>          开关命令，默认拒绝其他模组命令（需权限 3）
 ```
 
 ### 任务录制与回放

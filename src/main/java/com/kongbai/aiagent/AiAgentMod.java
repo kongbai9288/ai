@@ -18,6 +18,7 @@ import com.kongbai.aiagent.task.TaskRegistry;
 import com.kongbai.aiagent.task.TaskRunner;
 import com.kongbai.aiagent.util.Auditor;
 import com.kongbai.aiagent.util.PermissionGuard;
+import com.kongbai.aiagent.util.PermissionPolicy;
 import com.mojang.brigadier.CommandDispatcher;
 import net.fabricmc.api.ModInitializer;
 import net.minecraft.commands.CommandBuildContext;
@@ -156,6 +157,7 @@ public class AiAgentMod implements ModInitializer {
             ProfileManager.getInstance().attach(saveDir);
             TaskRegistry.getInstance().attach(saveDir);
             MachineRegistry.getInstance().attach(saveDir);
+            PermissionPolicy.getInstance().attach(saveDir);
             LOGGER.info("[假人智能] 配置/任务/机器系统已挂载: {}", saveDir);
         }
 
@@ -166,6 +168,7 @@ public class AiAgentMod implements ModInitializer {
             ProfileManager.getInstance().detach();
             TaskRegistry.getInstance().detach();
             MachineRegistry.getInstance().detach();
+            PermissionPolicy.getInstance().detach();
             RecorderManager.getInstance().abortAll();
             TaskRunner.getInstance().stopAll();
             Scheduler.getInstance().stopAll();

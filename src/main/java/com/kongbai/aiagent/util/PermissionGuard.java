@@ -150,8 +150,15 @@ public final class PermissionGuard {
         if (FORBIDDEN_ROOTS.contains(root)) {
             return "命令 /" + root + " 在永久黑名单中";
         }
-        if (!ALLOWED_ROOTS.contains(root)) {
-            return "命令 /" + root + " 不在允许清单内";
+        // 服主显式禁用 —— 优先级高于内置白名单，用于收紧默认放行的命令
+        if (PermissionPolicy.getInstance().isDenied(root)) {
+            return "命令 /" + root + " 已被服主禁用（见 /carpet ai policy）";
+        }
+        // 白名单 = 内置清单 + 服主额外开启。
+        // 其余一律拒绝 —— 其他模组注册的命令默认全部 ban，
+        // 需服主确认安全后显式开启，否则本模组无法预判其破坏力。
+        if (!ALLOWED_ROOTS.contains(root) && !PermissionPolicy.getInstance().isAllowed(root)) {
+            return "命令 /" + root + " 不在允许清单内（其他模组的命令默认拒绝）";
         }
         // 命令根放行还不够 —— 还要看这条命令具体想干什么
         return checkSemantics(root, trimmed);
@@ -274,6 +281,16 @@ public final class PermissionGuard {
             return "AI 不允许修改 Carpet 规则（仅可查询）";
         }
         return null;
+    }
+
+    /**
+     * 该命令根是否在永久黑名单中（供 {@link PermissionPolicy} 校验用）。
+     *
+     * <p>永久黑名单<b>不可被任何策略覆盖</b>：即使服主显式 {@code allow}，
+     * {@code PermissionPolicy.allow} 也会拒绝。这是整个安全模型的底线。
+     */
+    public static boolean isPermanentlyForbidden(@Nullable String root) {
+        return root != null && FORBIDDEN_ROOTS.contains(root.toLowerCase(Locale.ROOT));
     }
 
     /**

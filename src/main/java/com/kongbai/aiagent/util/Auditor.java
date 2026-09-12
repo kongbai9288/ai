@@ -41,7 +41,9 @@ public final class Auditor {
         /** 长期任务到期停止。 */
         SCHEDULER("调度"),
         /** 玩家直接触发。 */
-        PLAYER("玩家");
+        PLAYER("玩家"),
+        /** 服主修改命令策略（allow/deny/remove/reset）。 */
+        POLICY("策略");
 
         private final String label;
 

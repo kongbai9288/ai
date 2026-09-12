@@ -16,6 +16,7 @@ import com.kongbai.aiagent.task.TaskRegistry;
 import com.kongbai.aiagent.task.TaskRunner;
 import com.kongbai.aiagent.util.Auditor;
 import com.kongbai.aiagent.util.PermissionGuard;
+import com.kongbai.aiagent.util.PermissionPolicy;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.FloatArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
@@ -33,6 +34,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.Locale;
 import java.util.UUID;
 
@@ -61,6 +63,15 @@ public final class AiCommand {
 
     /** 查看他人配置所需的最低权限等级（2 = 可被 /op 的普通管理）。 */
     private static final int PERM_VIEW_OTHERS = 2;
+
+    /**
+     * 修改命令策略所需权限等级（3 = 管理级）。
+     *
+     * <p>策略是「闸门之上的闸门」：改它等于改 AI 的能力边界。
+     * 定在 2（OP 常见默认值）会让普通 OP 就能放行高危命令，因此取 3。
+     * 服务器控制台权限为 4，天然满足。
+     */
+    private static final int PERM_POLICY = 3;
 
     private AiCommand() {
     }
@@ -94,6 +105,7 @@ public final class AiCommand {
                         .then(Commands.argument("count", IntegerArgumentType.integer(1, 100))
                                 .executes(ctx -> showAudit(ctx.getSource(),
                                         IntegerArgumentType.getInteger(ctx, "count")))))
+                .then(buildPolicyNode())
                 .then(Commands.literal("perm")
                         .executes(ctx -> showPermissions(ctx.getSource())));
 
@@ -109,6 +121,38 @@ public final class AiCommand {
         }
         carpetNode.addChild(aiNode.build());
         LOGGER.info("[ai-agent] 已注册 /carpet ai 命令");
+    }
+
+    /**
+     * {@code /carpet ai policy} —— 命令策略管理。
+     *
+     * <p><b>需要权限等级 3+</b>：这是「闸门之上的闸门」，
+     * 修改它等于修改整个 AI 的能力边界，绝不能让普通玩家（或 AI）触及。
+     *
+     * <p><b>为什么必须存在</b>：本模组默认拒绝一切不在内置白名单里的命令，
+     * 包括其他模组注册的 {@code home} / {@code back} / {@code rtp} / {@code warp} 等。
+     * 服主确认安全后，用 {@code allow} 逐条开启；也可以用 {@code deny}
+     * 反向收紧内置白名单里已放行的命令（例如禁掉 {@code give}）。
+     */
+    @NotNull
+    private static LiteralArgumentBuilder<CommandSourceStack> buildPolicyNode() {
+        return Commands.literal("policy")
+                .requires(src -> PermissionGuard.levelOf(src) >= PERM_POLICY)
+                .executes(ctx -> showPolicy(ctx.getSource()))
+                .then(Commands.literal("allow")
+                        .then(Commands.argument("root", StringArgumentType.word())
+                                .executes(ctx -> policyAllow(ctx.getSource(),
+                                        StringArgumentType.getString(ctx, "root")))))
+                .then(Commands.literal("deny")
+                        .then(Commands.argument("root", StringArgumentType.word())
+                                .executes(ctx -> policyDeny(ctx.getSource(),
+                                        StringArgumentType.getString(ctx, "root")))))
+                .then(Commands.literal("remove")
+                        .then(Commands.argument("root", StringArgumentType.word())
+                                .executes(ctx -> policyRemove(ctx.getSource(),
+                                        StringArgumentType.getString(ctx, "root")))))
+                .then(Commands.literal("reset")
+                        .executes(ctx -> policyReset(ctx.getSource())));
     }
 
     @NotNull
@@ -391,6 +435,7 @@ public final class AiCommand {
         send(source, "§7/carpet ai end confirm §f执行所有任务（等价 run all）");
         send(source, "§7/carpet ai perm §f查看 AI 可执行命令范围");
         send(source, "§7/carpet ai audit [条数] §f查看命令审计日志（需权限 2）");
+        send(source, "§7/carpet ai policy allow|deny <命令根> §f开关命令（需权限 3）");
         return 1;
     }
 
@@ -1282,6 +1327,77 @@ public final class AiCommand {
                 + PermissionGuard.MAX_COMMAND_LENGTH + " §7字符");
         send(source, "§7所有命令均以「任务开启者」的权限等级执行，无法提权");
         return 1;
+    }
+
+    // ---------- 命令策略 ----------
+
+    private static int showPolicy(@NotNull CommandSourceStack source) {
+        PermissionPolicy policy = PermissionPolicy.getInstance();
+        send(source, "§6命令策略 §8（默认拒绝：不在清单内的一律拦截）");
+        send(source, "§a额外放行 §7(" + policy.extraAllowed().size() + "): §f"
+                + (policy.extraAllowed().isEmpty() ? "无"
+                        : String.join(", ", policy.extraAllowed())));
+        send(source, "§c额外禁用 §7(" + policy.extraDenied().size() + "): §f"
+                + (policy.extraDenied().isEmpty() ? "无"
+                        : String.join(", ", policy.extraDenied())));
+        send(source, "§7用法: §f/carpet ai policy allow|deny|remove <命令根>");
+        send(source, "§7      §f/carpet ai policy reset §8清空自定义规则");
+        send(source, "§8永久黑名单（op/stop/fill...）不可通过 allow 开启");
+        if (!policy.isAttached()) {
+            send(source, "§6策略系统未挂载，本次修改不会保存到磁盘");
+        }
+        return 1;
+    }
+
+    private static int policyAllow(@NotNull CommandSourceStack source, @NotNull String root) {
+        String error = PermissionPolicy.getInstance().allow(root);
+        if (error != null) {
+            sendError(source, error);
+            return 0;
+        }
+        send(source, "§a已放行命令根 §f" + root + " §7（AI 现在可以调用 /" + root + "）");
+        warnIfRisky(source, root);
+        return 1;
+    }
+
+    private static int policyDeny(@NotNull CommandSourceStack source, @NotNull String root) {
+        String error = PermissionPolicy.getInstance().deny(root);
+        if (error != null) {
+            sendError(source, error);
+            return 0;
+        }
+        send(source, "§a已禁用命令根 §f" + root);
+        return 1;
+    }
+
+    private static int policyRemove(@NotNull CommandSourceStack source, @NotNull String root) {
+        if (!PermissionPolicy.getInstance().remove(root)) {
+            sendError(source, "策略中没有自定义规则: " + root);
+            return 0;
+        }
+        send(source, "§a已移除 §f" + root + " §7的自定义规则（回到默认）");
+        return 1;
+    }
+
+    private static int policyReset(@NotNull CommandSourceStack source) {
+        int count = PermissionPolicy.getInstance().reset();
+        send(source, count == 0 ? "§7本来就没有自定义规则"
+                : "§a已清空 " + count + " 条自定义规则，回到出厂状态");
+        return 1;
+    }
+
+    /**
+     * 放行高危类命令时给一句提醒。
+     *
+     * <p>不阻止 —— 服主可能有正当理由（例如装了经济插件要让 AI 查余额）。
+     * 但把风险摆出来，避免手滑放行 {@code give} 之类。
+     */
+    private static void warnIfRisky(@NotNull CommandSourceStack source, @NotNull String root) {
+        Set<String> risky = Set.of("give", "summon", "tp", "teleport", "gamemode",
+                "effect", "clear", "weather", "time", "gamerule", "setworldspawn");
+        if (risky.contains(root.toLowerCase(java.util.Locale.ROOT))) {
+            send(source, "§6注意：/" + root + " 会改变世界或玩家状态，请确认你信任 AI 的使用方式");
+        }
     }
 
     /**
