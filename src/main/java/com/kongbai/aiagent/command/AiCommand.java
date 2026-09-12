@@ -73,6 +73,12 @@ public final class AiCommand {
      */
     private static final int PERM_POLICY = 3;
 
+    /** 召唤/停止/移除假人所需权限等级。 */
+    private static final int PERM_BOT = 2;
+
+    /** 定义与开关机器所需权限等级。 */
+    private static final int PERM_MACHINE = 2;
+
     private AiCommand() {
     }
 
@@ -291,7 +297,11 @@ public final class AiCommand {
     /** {@code /carpet ai machine ...} 机器管理。 */
     @NotNull
     private static LiteralArgumentBuilder<CommandSourceStack> buildMachineNode() {
+        // 机器是服务器级共享定义：开关它会驱动假人执行录制好的任务，
+        // 等同于让假人代替你操作世界。因此「定义/改写」与「开关」都要求权限 2，
+        // 只读的 list 保持开放。
         return Commands.literal("machine")
+                .requires(src -> PermissionGuard.levelOf(src) >= PERM_MACHINE)
                 .executes(ctx -> machineList(ctx.getSource()))
                 .then(Commands.literal("list")
                         .executes(ctx -> machineList(ctx.getSource())))
@@ -342,7 +352,10 @@ public final class AiCommand {
     /** {@code /carpet ai bot ...} 假人管理。 */
     @NotNull
     private static LiteralArgumentBuilder<CommandSourceStack> buildBotNode() {
+        // 召唤/杀掉假人是服务器级操作（假人是共享资源，且会在存档留下玩家数据），
+        // 不能让任何能说 /carpet 的人执行。这里要求权限等级 2。
         return Commands.literal("bot")
+                .requires(src -> PermissionGuard.levelOf(src) >= PERM_BOT)
                 .executes(ctx -> botInfo(ctx.getSource(), null))
                 .then(Commands.literal("list")
                         .executes(ctx -> botList(ctx.getSource())))
@@ -1219,9 +1232,13 @@ public final class AiCommand {
             sendError(source, "服务器未就绪");
             return 0;
         }
-        // Carpet 的 /player X spawn 在 X 已存在时会复用，不新建存档条目
-        server.getCommands().performPrefixedCommand(
-                server.createCommandSourceStack(), FakePlayerNaming.spawnCommand(name));
+        // Carpet 的 /player X spawn 在 X 已存在时会复用，不新建存档条目。
+        // 必须降权：server.createCommandSourceStack() 是等级 4 的服务器 source，
+        // 直接用它会绕过 Carpet 的 commandPlayer 规则（默认 "ops"），
+        // 让本没有 /player 权限的人也能召唤假人。
+        AiAgentMod.createCommandSink(server, Auditor.Source.PLAYER)
+                .execute(FakePlayerNaming.spawnCommand(name),
+                        PermissionGuard.levelOf(source));
         send(source, "§a已请求召唤假人 §f" + name);
         if (!rawName.equals(name)) {
             send(source, "§7（已自动加前缀：§f" + rawName + " §7→ §f" + name + "§7）");
@@ -1236,13 +1253,17 @@ public final class AiCommand {
             sendError(source, "假人名不能为空");
             return 0;
         }
+        // 必须降权：server.createCommandSourceStack() 是等级 4 的服务器 source，
+        // 直接用它会绕过 Carpet 的 commandPlayer 规则（默认 "ops"），
+        // 让本没有 /player 权限的人也能召唤/杀掉假人。
         MinecraftServer server = source.getServer();
         if (server == null) {
             sendError(source, "服务器未就绪");
             return 0;
         }
-        server.getCommands().performPrefixedCommand(
-                server.createCommandSourceStack(), FakePlayerNaming.stopCommand(name));
+        AiAgentMod.createCommandSink(server, Auditor.Source.PLAYER)
+                .execute(FakePlayerNaming.stopCommand(name),
+                        PermissionGuard.levelOf(source));
         send(source, "§a已停止假人 §f" + name + " §7的当前动作");
         return 1;
     }
@@ -1253,13 +1274,17 @@ public final class AiCommand {
             sendError(source, "假人名不能为空");
             return 0;
         }
+        // 必须降权：server.createCommandSourceStack() 是等级 4 的服务器 source，
+        // 直接用它会绕过 Carpet 的 commandPlayer 规则（默认 "ops"），
+        // 让本没有 /player 权限的人也能召唤/杀掉假人。
         MinecraftServer server = source.getServer();
         if (server == null) {
             sendError(source, "服务器未就绪");
             return 0;
         }
-        server.getCommands().performPrefixedCommand(
-                server.createCommandSourceStack(), FakePlayerNaming.killCommand(name));
+        AiAgentMod.createCommandSink(server, Auditor.Source.PLAYER)
+                .execute(FakePlayerNaming.killCommand(name),
+                        PermissionGuard.levelOf(source));
         send(source, "§a已移除假人 §f" + name);
         send(source, "§6注意：移除会清掉该假人的背包数据");
         return 1;

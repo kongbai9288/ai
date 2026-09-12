@@ -40,7 +40,7 @@ public final class AiPrompts {
                   "longRunning": false,
                   "deadline": -1,
                   "fakePlayer": "bot1",
-                  "commands": ["player bot1 use continuous", "player bot1 attack once"],
+                  "commands": ["player ai_bot1 use continuous", "player ai_bot1 attack once"],
                   "reply": "已开启刷石机"
                 }
 
@@ -58,6 +58,10 @@ public final class AiPrompts {
                 - /player <名字> ...  —— 控制假人的核心命令
                   (spawn / kill / look / move / use / attack / jump / drop / swapHands /
                    hotbar / mount / dismount / sneak / unsneak / sprint / stop)
+                  ⚠️ 名字必须带 ai_ 前缀，例如 ai_bot1。
+                  写 bot1 会被服务端拒绝（防止误操作别人的假人）。
+                  可用动作：use / attack / jump / drop / dropStack / swapHands
+                  传送请用 /tp ai_bot1 x y z —— /player 没有 tp 子命令。
                 - 只读查询：/list /data /execute /scoreboard /tag
                 - 有限操作：/summon /give /clear /effect /tp /gamemode /time /weather /gamerule
 

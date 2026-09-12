@@ -128,6 +128,38 @@ home / rtp / warp / money / back / sethome / tpa / nick / fly ...
 > `checkCarpet` 只放行 `carpet ai machine`，AI 调用 `carpet ai policy` 会被拦截；
 > 命令本身也要求权限等级 3+。否则 AI 一句 `policy allow op` 就能撕掉全部防线。
 
+### 与 Carpet 的对齐问题（本轮重点）
+
+之前的实现有几处**根本没对上 Carpet 的 `/player` 语法**，功能看着在跑实则空转：
+
+| 问题 | 说明 |
+|---|---|
+| **`player <名> tp` 不存在** | Carpet 的 `/player` 子命令只有 `spawn/kill/shadow/move/look/turn/use/attack/jump/drop/.../stop`，**没有 `tp`**。回放的移动动作 100% 失败。改用原版 `/tp <名> x y z`（假人是真实玩家实体，原版 tp 有效） |
+| **回放前不召唤假人** | 直接发 `player X use`，假人不存在则全部失败。现在回放启动时会先发一次 `player X spawn`（Carpet 对已存在的假人会复用，不会新建存档数据） |
+| **假人名前缀对不上** | 模组召唤时统一加 `ai_` 前缀，但 AI 提示词示例写的是 `player bot1 use` —— AI 照着学会去操作**别人的假人**。现在提示词改用 `ai_bot1`，并在闸门里**强制校验 `/player` 的目标必须带 `ai_` 前缀** |
+| **`/player ai_* kill` 是假的** | Carpet **不支持名字通配符**，旧注释误导。前缀只用于标识归属，批量清理需自行遍历 |
+| **`spawnCommandIfNeeded` 不存在** | 类注释引用了一个根本没实现的方法 |
+
+**新增的 `/player` 目标校验**（实测）：
+
+```
+player bot1 use continuous      -> 拦截（裸名，可能打错目标）
+player Steve attack continuous  -> 拦截（真实玩家！）
+player Steve kill               -> 拦截
+player ai_bot1 use continuous   -> 放行
+```
+
+这条不只是防误伤 —— `/player` 能作用在**真实在线玩家**身上，
+不校验等于允许 AI 对服务器上任何人下发动作指令。
+
+> ⚠️ **老任务可能受影响**：录制任务里若含裸名 `player bot1 ...`，回放时会被拦截。
+> 这是有意为之，请重新录制或用 `setstate` 校正。
+
+**其他对齐**：`bot spawn/stop/kill` 之前用 `server.createCommandSourceStack()`（等级 4）
+直接派发，会绕过 Carpet 的 `commandPlayer` 规则（默认 `ops`）——
+本没有 `/player` 权限的人也能召唤/杀掉假人。现在改为降权执行，且命令要求权限 2。
+`machine` 节点同样补上权限要求。
+
 ### HTTP 客户端
 
 | 风险 | 处理 |

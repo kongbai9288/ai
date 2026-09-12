@@ -21,8 +21,8 @@ import java.util.regex.Pattern;
  * 复用同名假人则始终只有固定几份数据。
  *
  * <p><b>本类无状态</b>：不缓存任何假人信息（那会与真实世界不同步）。
- * 是否需要召唤由调用方通过 {@link #spawnCommandIfNeeded} 生成命令后
- * 由 Carpet 自己判定，或者由调用方先 {@code /player list} 查询。
+ * 是否需要召唤由调用方直接 {@code /player <name> spawn} ——
+ * Carpet 对已存在的假人会自己复用，无需先查列表。
  */
 public final class FakePlayerNaming {
 
@@ -30,7 +30,11 @@ public final class FakePlayerNaming {
      * 假人专属前缀。
      *
      * <p>Carpet 假人名允许的字符有限（不能含空格、特殊符号），
-     * 下划线安全。前缀也便于用 {@code /player ai_* kill} 批量清理。
+     * 下划线安全。
+     *
+     * <p><b>注意：Carpet 的 {@code /player} 不支持名字通配符</b> ——
+     * 旧注释提到的 {@code /player ai_* kill} 实际不存在，别照着写。
+     * 前缀的作用是「一眼看出这是本模组的假人」，批量清理需自行遍历名单。
      */
     public static final String PREFIX = "ai_";
 
@@ -166,10 +170,44 @@ public final class FakePlayerNaming {
      * 因此无条件 spawn 也能实现复用 —— 这正是「减少存储压力」的关键。
      *
      * <p>只有真正不存在时才会新建。
+     *
+     * <p><b>注意 spawn 的位置</b>：不带 {@code at} 时假人生成在<b>执行者所在位置</b>。
+     * 本模组的命令投递器用的是服务器级 source（没有实体），
+     * 生成点会是世界出生点而非玩家身边。需要定位时用
+     * {@link #spawnAtCommand(String, double, double, double)}。
      */
     @NotNull
     public static String spawnCommand(@NotNull String fakeName) {
         return "player " + fakeName + " spawn";
+    }
+
+    /**
+     * 生成「在指定坐标召唤假人」的命令。
+     *
+     * <p>Carpet 语法（已核对）：
+     * {@code /player <name> spawn at <X> <Y> <Z> [facing <yaw> <pitch>] [in <dim>] [in <gamemode>]}
+     *
+     * <p>回放开始时用它把假人直接放到第一个移动点上，
+     * 避免「先在世界出生点冒出来、再被传送」的闪烁。
+     */
+    @NotNull
+    public static String spawnAtCommand(@NotNull String fakeName, double x, double y, double z) {
+        return String.format(java.util.Locale.ROOT,
+                "player %s spawn at %.3f %.3f %.3f", fakeName, x, y, z);
+    }
+
+    /**
+     * 生成「传送已存在假人」的命令。
+     *
+     * <p><b>为什么不是 {@code /player X tp}</b>：
+     * Carpet 的 {@code /player} <b>没有 {@code tp} 子命令</b>（全部子命令为
+     * spawn / kill / shadow / move / look / turn / use / attack / jump / drop /
+     * dropStack / swapHands / hotbar / mount / dismount / sneak / sprint / stop）。
+     * 传送假人要用原版 {@code /tp} —— 假人是真实注册的玩家实体，原版 tp 对其有效。
+     */
+    @NotNull
+    public static String teleportCommand(@NotNull String fakeName, double x, double y, double z) {
+        return String.format(java.util.Locale.ROOT, "tp %s %.3f %.3f %.3f", fakeName, x, y, z);
     }
 
     /** 生成「停止假人当前动作」的命令（用于任务结束清理）。 */

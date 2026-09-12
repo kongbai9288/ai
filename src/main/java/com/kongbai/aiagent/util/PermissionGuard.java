@@ -190,6 +190,9 @@ public final class PermissionGuard {
             case "carpet" -> {
                 return checkCarpet(command);
             }
+            case "player" -> {
+                return checkPlayerTarget(command);
+            }
             default -> {
                 Set<String> allowedSubs = READ_ONLY_SUBCOMMANDS.get(root);
                 if (allowedSubs == null) {
@@ -198,6 +201,38 @@ public final class PermissionGuard {
                 return checkReadOnlySubcommand(root, command, allowedSubs);
             }
         }
+    }
+
+    /**
+     * 校验 {@code /player} 的目标<b>必须是本模组管理的假人</b>（{@code ai_} 前缀）。
+     *
+     * <p><b>为什么必须校验</b>：{@code /player} 是服务器级共享资源的操作入口，
+     * 它能作用在任何玩家身上 —— 包括别人召唤的假人，乃至<b>真实在线玩家</b>
+     * （{@code /player Steve attack continuous}、{@code /player Steve kill}）。
+     * 只校验命令根等于允许 AI 对服务器上任何人下发动作指令。
+     *
+     * <p><b>与前缀的关系（这正是"前缀对不上"的坑）</b>：
+     * 本模组召唤假人时会统一加 {@code ai_} 前缀（见 {@code FakePlayerNaming}），
+     * 但 AI 提示词、玩家录制的任务里写的往往是不带前缀的裸名（{@code bot1}）。
+     * 于是命令会去操作<b>另一个</b>叫 {@code bot1} 的假人 ——
+     * 既没驱动到目标，又污染了别人的假人。
+     * 强制要求前缀，能把这类"看起来执行成功、实际打错目标"的问题变成明确报错。
+     *
+     * @return 放行返回 {@code null}；拒绝返回原因
+     */
+    @Nullable
+    private static String checkPlayerTarget(@NotNull String command) {
+        String[] parts = command.trim().split("\\s+");
+        if (parts.length < 2) {
+            return "/player 缺少目标名";
+        }
+        String target = parts[1];
+        if (!com.kongbai.aiagent.machine.FakePlayerNaming.isOurs(target)) {
+            return "/player 的目标必须是 " + com.kongbai.aiagent.machine.FakePlayerNaming.PREFIX
+                    + " 前缀的假人（收到: " + target + "）"
+                    + "—— 不允许操作他人假人或真实玩家";
+        }
+        return null;
     }
 
     /**

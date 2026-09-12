@@ -299,6 +299,8 @@ public final class TaskRunner {
         private int cursor;
         /** 本回放发送过"检测中"提示，避免每个动作都刷屏。 */
         private boolean probeNotified;
+        /** 是否已发出过召唤命令（只需一次，之后 Carpet 会复用该假人）。 */
+        private boolean spawned;
 
         Playback(long id, @NotNull RecordedTask task, @Nullable String fakeName,
                  long startTick, boolean force, int effectivePermLevel,
@@ -327,6 +329,12 @@ public final class TaskRunner {
             if (isDone()) {
                 return;
             }
+            // 驱动假人时先确保假人存在 —— 缺了这一步，后续所有
+            // /player <假人> ... 都会因目标不存在而失败，回放看着在跑实则全是空转。
+            if (fakeName != null && !spawned) {
+                spawned = true;
+                sink.execute(FakePlayerNaming.spawnCommand(fakeName), effectivePermLevel);
+            }
             long elapsed = Math.max(0, currentTick - startTick);
             List<RecordedAction> actions = task.actions();
             while (cursor < actions.size()) {
@@ -352,11 +360,9 @@ public final class TaskRunner {
                     if (target == null) {
                         break; // 既无假人也无执行者名字，无法定位目标
                     }
-                    String cmd = fakeName == null
-                            ? String.format(Locale.ROOT, "tp %s %.3f %.3f %.3f", target,
-                            action.x(), action.y(), action.z())
-                            : String.format(Locale.ROOT, "player %s tp %.3f %.3f %.3f",
-                            fakeName, action.x(), action.y(), action.z());
+                    // 原版 /tp 传送（Carpet 的 /player 没有 tp 子命令，见 FakePlayerNaming）
+                    String cmd = String.format(Locale.ROOT, "tp %s %.3f %.3f %.3f",
+                            target, action.x(), action.y(), action.z());
                     dispatch(currentTick, cmd, "移动", sink, messages);
                 }
                 case LOOK -> {
