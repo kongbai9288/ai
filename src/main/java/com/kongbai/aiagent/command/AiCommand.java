@@ -377,7 +377,13 @@ public final class AiCommand {
                 .then(Commands.literal("kill")
                         .then(Commands.argument("name", StringArgumentType.word())
                                 .executes(ctx -> botKill(ctx.getSource(),
-                                        StringArgumentType.getString(ctx, "name")))));
+                                        StringArgumentType.getString(ctx, "name")))))
+                .then(Commands.literal("phantom")
+                        .executes(ctx -> phantomStatus(ctx.getSource()))
+                        .then(Commands.literal("off")
+                                .executes(ctx -> phantomSet(ctx.getSource(), false)))
+                        .then(Commands.literal("on")
+                                .executes(ctx -> phantomSet(ctx.getSource(), true))));
     }
 
     /** {@code /carpet ai sched ...} 长期任务。 */
@@ -1226,6 +1232,52 @@ public final class AiCommand {
         return 1;
     }
 
+    /**
+     * 幻翼开关（一键 {@code /gamerule spawn_phantoms}）。
+     *
+     * <p><b>为什么需要</b>：幻翼生成条件是「玩家 3 游戏日未上床睡觉」。
+     * <b>假人永远不会睡觉</b>，所以长期挂机必然招来幻翼，且它会<b>持续</b>生成 ——
+     * 幻翼生成时无视敌对生物上限，抗性只挡伤害、挡不住持续骚扰与被击退。
+     *
+     * <p><b>为什么不做「被打死后自动复活」来重置</b>：死亡确实能重置 insomnia 计时，
+     * 但 Carpet 的假人死亡 = 掉线 + 掉落物品，代价太大。
+     * 从源头关掉生成才是干净做法。
+     *
+     * <p>注意 {@code spawn_phantoms} 是 Java 26.2 的新名字（原 {@code doInsomnia}），
+     * 且这是<b>全服规则</b> —— 关掉后所有玩家都不会再因失眠刷幻翼。
+     */
+    private static int phantomStatus(@NotNull CommandSourceStack source) {
+        boolean guard = PermissionPolicy.getInstance().phantomGuard();
+        send(source, "§6幻翼防护: " + (guard ? "§a开启" : "§7关闭"));
+        send(source, "§7假人永不睡觉，长期挂机必然招幻翼（3 游戏日后开始生成，"
+                + "且生成时无视生物上限）");
+        send(source, "§7关闭幻翼生成: §f/carpet ai bot phantom off");
+        send(source, "§8等价于 /gamerule spawn_phantoms false（全服规则，影响所有玩家）");
+        return 1;
+    }
+
+    private static int phantomSet(@NotNull CommandSourceStack source, boolean enableSpawn) {
+        MinecraftServer server = source.getServer();
+        if (server == null) {
+            sendError(source, "服务器未就绪");
+            return 0;
+        }
+        // 幻翼生成开关：false = 阻止生成（防护开启）
+        String command = "gamerule spawn_phantoms " + (enableSpawn ? "true" : "false");
+        String reason = PermissionGuard.check(command);
+        if (reason != null) {
+            sendError(source, reason);
+            return 0;
+        }
+        AiAgentMod.createCommandSink(server, Auditor.Source.PLAYER)
+                .execute(command, PermissionGuard.levelOf(source));
+        PermissionPolicy.getInstance().setPhantomGuard(!enableSpawn, false);
+        send(source, enableSpawn
+                ? "§6已恢复幻翼生成（假人长期挂机会被骚扰）"
+                : "§a已关闭幻翼生成（全服规则，假人不再被幻翼干扰）");
+        return 1;
+    }
+
     private static int botSpawn(@NotNull CommandSourceStack source, String rawName) {
         String name = FakePlayerNaming.normalize(rawName);
         if (name == null) {
@@ -1451,10 +1503,17 @@ public final class AiCommand {
      * 但把风险摆出来，避免手滑放行 {@code give} 之类。
      */
     private static void warnIfRisky(@NotNull CommandSourceStack source, @NotNull String root) {
+        String lower = root.toLowerCase(java.util.Locale.ROOT);
         Set<String> risky = Set.of("give", "summon", "tp", "teleport", "gamemode",
                 "effect", "clear", "weather", "time", "gamerule", "setworldspawn");
-        if (risky.contains(root.toLowerCase(java.util.Locale.ROOT))) {
+        if (risky.contains(lower)) {
             send(source, "§6注意：/" + root + " 会改变世界或玩家状态，请确认你信任 AI 的使用方式");
+        } else if (!PermissionGuard.isBuiltinAllowed(lower)) {
+            // 内置清单之外的命令：多半来自其他模组（TIS/GCA/Carpet-Org-Addition 等），
+            // 本模组无法预判其破坏力，必须让服主知情。
+            send(source, "§6注意：/" + root + " 不是本模组内置命令，其破坏力无法预判");
+            send(source, "§7若它来自其他模组（如 TIS / GCA 的 /manipulate、/removeentity），"
+                    + "放行等于把那个模组的权限也交给 AI");
         }
     }
 

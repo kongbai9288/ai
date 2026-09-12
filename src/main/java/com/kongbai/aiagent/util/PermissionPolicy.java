@@ -77,6 +77,17 @@ public final class PermissionPolicy {
     @NotNull
     private volatile String botPrefix = com.kongbai.aiagent.machine.FakePlayerNaming.PREFIX;
 
+    /**
+     * 幻翼防护（默认开）。
+     *
+     * <p><b>为什么需要</b>：幻翼的生成条件是「玩家 3 游戏日（72000 刻）未上床睡觉」。
+     * <b>假人永远不会睡觉</b>，所以长期挂机必然招来幻翼，且它会持续不断地生成 ——
+     * 幻翼生成时<b>无视敌对生物上限</b>，抗性也挡不住持续骚扰与被击退。
+     *
+     * <p>开启后：保活检查时把假人 {@code tp} 回精确坐标，抵消被幻翼击退的位移。
+     */
+    private volatile boolean phantomGuard = true;
+
     @Nullable
     private volatile Path saveDir;
 
@@ -134,6 +145,33 @@ public final class PermissionPolicy {
 
     public int size() {
         return extraAllowed.size() + extraDenied.size();
+    }
+
+    /**
+     * 是否开启幻翼防护。
+     *
+     * <p>注意：本开关<b>只做「位移回正」</b>，不能阻止幻翼生成。
+     * 彻底关闭请用 {@code /carpet ai bot phantom off}（等价于
+     * {@code /gamerule spawn_phantoms false}）。
+     */
+    public boolean phantomGuard() {
+        return phantomGuard;
+    }
+
+    /**
+     * 设置幻翼防护。
+     *
+     * @param enabled 是否开启
+     * @param silent  为 true 时不写审计（用于从存档载入时）
+     */
+    public void setPhantomGuard(boolean enabled, boolean silent) {
+        this.phantomGuard = enabled;
+        if (!silent) {
+            Auditor.getInstance().record(0L, null, 0,
+                    "phantomGuard " + (enabled ? "on" : "off"),
+                    Auditor.Result.EXECUTED, Auditor.Source.POLICY, null);
+            save();
+        }
     }
 
     @NotNull
@@ -289,6 +327,7 @@ public final class PermissionPolicy {
             root.add("allow", toArray(extraAllowed));
             root.add("deny", toArray(extraDenied));
             root.addProperty("botPrefix", botPrefix);
+            root.addProperty("phantomGuard", phantomGuard);
             return JsonUtil.writeTree(policyFile(), root);
         } catch (IllegalStateException e) {
             return false;
@@ -311,6 +350,16 @@ public final class PermissionPolicy {
         if (allowed + denied > 0) {
             LOGGER.info("[ai-agent] 已加载命令策略：额外放行 {} 条、额外禁用 {} 条", allowed, denied);
         }
+        // 恢复幻翼防护（默认 true；存档里明确写了 false 才关）
+        JsonElement guardElement = JsonUtil.path(root, "phantomGuard");
+        if (guardElement != null && guardElement.isJsonPrimitive()) {
+            try {
+                phantomGuard = guardElement.getAsBoolean();
+            } catch (RuntimeException ignored) {
+                phantomGuard = true;
+            }
+        }
+
         // 恢复假人名前缀（并同步到 FakePlayerNaming）
         String saved = JsonUtil.stringOr(root, "", "botPrefix");
         if (!saved.isEmpty()) {

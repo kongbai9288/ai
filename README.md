@@ -197,6 +197,76 @@ player ai_bot1 use continuous   -> 放行
 实测 `ai_;op x`、`ai_x;stop` 这类注入前缀全部被拒。
 真实玩家（`Steve` / `Notch`）无论前缀怎么配都仍被拦截。
 
+### 白名单命令的「目标」此前完全不受限（可作用于任意玩家）
+
+白名单按**命令根**放行，但这些命令的**作用对象是谁**此前完全自由。
+放行 `give` 本意是「给假人发工具」，实测（修复前）以下全部放行：
+
+```
+give Steve diamond 64                    -> 给任意玩家刷物品
+give @a netherite_block 64               -> 给全服刷
+gamemode creative Steve                  -> 把玩家变创造
+tp Steve 0 -64 0                         -> 传玩家进虚空
+effect give Steve minecraft:poison 9999  -> 毒杀玩家
+```
+
+这就是「有人使坏」最直接的入口 —— 只需诱导 AI 输出这类命令。
+
+**修复**：对带目标参数的命令强制「目标必须是本模组的假人」，且**拒绝一切选择器**：
+
+| 命令 | 目标位置 |
+|---|---|
+| `give <target> <item>` | 第 1 段 |
+| `tp / teleport <target> <pos>` | 第 1 段 |
+| `clear [target]` | 第 1 段 |
+| `gamemode <mode> [target]` | 第 2 段（可缺省） |
+| `effect give <target> <effect>` | 第 3 段 |
+
+> 选择器（`@a` / `@e` / `@p` / `@s`）**一律拒绝** ——
+> `give @a ...` 等于给全服刷物品。必须写明具体的 `ai_` 假人名，范围可控且可审计。
+
+**B. 让假人干破坏性动作**（`player ai_bot1 attack continuous`）是**设计内的** ——
+假人持续攻击/使用本身就是录制回放的核心能力。风险由**权限等级**兜底：
+Carpet 的 `commandPlayer` 默认 `ops`，降权后普通玩家触发的这类命令会执行失败。
+
+### 幻翼（假人永不睡觉 → 必然招幻翼）
+
+幻翼生成条件：**玩家 3 游戏日（72000 刻）未上床睡觉**。**假人永远不会睡觉**，
+所以长期挂机必然招来幻翼，且它会**持续**生成（幻翼生成时**无视敌对生物上限**）。
+
+抗性 255 挡得住伤害，但挡不住：持续骚扰、被击退位移（后续 `use` 全部打偏）、占用服务器资源。
+
+**推荐做法** —— 从源头关闭（一键）：
+
+```
+/carpet ai bot phantom          查看状态
+/carpet ai bot phantom off      关闭幻翼生成
+/carpet ai bot phantom on       恢复
+```
+
+等价于 `/gamerule spawn_phantoms false`（Java 26.2 新名，原 `doInsomnia`）。
+**注意这是全服规则**，关掉后所有玩家都不会因失眠刷幻翼。
+
+> **为什么不做「被打死后自动复活重置」**：死亡确实能重置 insomnia 计时，
+> 但 Carpet 假人死亡 = 掉线 + 掉落物品，代价太大。
+>
+> **为什么不每刻 `tp` 回出生点**：那会把假人钉死，
+> 直接摧毁回放轨迹（我实现过一次，发现后已撤回）。
+
+### 其他模组的 carpet 扩展命令
+
+Carpet 扩展（TIS Carpet Addition、GCA、Carpet-Org-Addition 等）注册的命令
+（`manipulate` / `removeentity` / `playerManager` / `playerAction` 等）
+**默认全部拒绝**，需服主 `policy allow`。
+
+`policy allow` 时会区分提示：
+- 内置高危命令（`give`/`tp`/`summon`…）→ 提示会改变世界
+- **内置清单之外**的命令 → 额外提示「破坏力无法预判，放行等于把那个模组的权限也交给 AI」
+
+Carpet 规则修改（3 段式，如 `/carpet commandScript true`）**一律拦截** ——
+`commandScript` / `commandScriptACE` 能开启 Scarpet 任意代码执行，
+放行了等于把服务器完全交出去。实测已拦截。
+
 ### HTTP 客户端
 
 | 风险 | 处理 |

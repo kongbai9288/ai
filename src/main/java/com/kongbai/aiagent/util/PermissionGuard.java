@@ -165,6 +165,111 @@ public final class PermissionGuard {
     }
 
     /**
+     * 带「目标」参数的白名单命令：命令根 -&gt; 目标参数在分段数组中的下标。
+     *
+     * <p><b>为什么必须限制目标</b>：白名单按「命令根」放行，但这些命令的
+     * <b>作用对象是谁</b>完全自由。放行 {@code give} 本意是「给假人发工具」，
+     * 实际却等于放行 {@code give Steve diamond 64} —— 给任意玩家刷物品。
+     *
+     * <p>实测（修复前）以下全部被放行：
+     * <pre>
+     *   give Steve diamond 64          -&gt; 给玩家刷物品
+     *   give @a netherite_block 64     -&gt; 给全服刷
+     *   gamemode creative Steve        -&gt; 把玩家变创造
+     *   tp Steve 0 -64 0               -&gt; 传玩家进虚空
+     *   effect give Steve poison 9999  -&gt; 毒杀玩家
+     * </pre>
+     * 这就是「有人使坏」最直接的入口：诱导 AI 输出这类命令即可。
+     *
+     * <p><b>下标说明</b>（parts[0] 是命令根本身）：
+     * <ul>
+     *   <li>{@code give &lt;target&gt; &lt;item&gt;} -&gt; 1</li>
+     *   <li>{@code tp &lt;target&gt; &lt;pos&gt;} -&gt; 1</li>
+     *   <li>{@code gamemode &lt;mode&gt; [target]} -&gt; 2（目标在模式之后，可能缺省）</li>
+     *   <li>{@code clear [target]} -&gt; 1</li>
+     * </ul>
+     */
+    private static final java.util.Map<String, Integer> TARGET_ARG_INDEX = java.util.Map.of(
+            "give", 1,
+            "tp", 1,
+            "teleport", 1,
+            "clear", 1,
+            "gamemode", 2
+    );
+
+    /**
+     * 校验带目标参数的命令：目标<b>必须是本模组管理的假人</b>。
+     *
+     * <p><b>为什么必须限制</b>：见 {@link #TARGET_ARG_INDEX}。
+     * 放行 {@code give} / {@code tp} / {@code gamemode} 的初衷是「操作假人」，
+     * 若不限制目标，等于把「对服务器上任意玩家为所欲为」的能力交给了 AI。
+     *
+     * <p><b>effect 单独处理</b>：它的目标是第 3 段（{@code effect give &lt;target&gt; ...}），
+     * 且 {@code effect clear} 允许缺省目标，因此不在表里、单独判断。
+     *
+     * <p><b>选择器一律拒绝</b>：{@code @a} / {@code @e} / {@code @p} / {@code @s}
+     * 会命中真实玩家或大量实体（{@code give @a ...} 等于给全服刷物品）。
+     * 强制写明确的假人名，范围可控且可审计。
+     */
+    @Nullable
+    private static String checkTargeted(@NotNull String root, @NotNull String command) {
+        Integer index = TARGET_ARG_INDEX.get(root);
+        if (index == null) {
+            if (root.equals("effect")) {
+                return checkEffectTarget(command);
+            }
+            return null; // 该命令没有目标参数
+        }
+        String[] parts = command.trim().split("\\s+");
+        if (parts.length <= index) {
+            // gamemode 的 targets 可缺省（作用于执行者）；其余情况参数不完整
+            return root.equals("gamemode") ? null : "命令参数不完整: " + command;
+        }
+        String target = parts[index];
+        return validateTarget(root, target);
+    }
+
+    /**
+     * 校验 {@code /effect}。
+     *
+     * <p>语法：{@code effect give &lt;target&gt; &lt;effect&gt; [seconds] [amplifier] [hideParticles]}
+     * 与 {@code effect clear [target] [effect]}。目标在 {@code give/clear} 之后。
+     */
+    @Nullable
+    private static String checkEffectTarget(@NotNull String command) {
+        String[] parts = command.trim().split("\\s+");
+        if (parts.length < 2) {
+            return "命令参数不完整: " + command;
+        }
+        String sub = parts[1].toLowerCase(Locale.ROOT);
+        if (!sub.equals("give")) {
+            return "/effect 仅允许 give（收到: " + sub + "）";
+        }
+        if (parts.length < 3) {
+            return "/effect give 缺少目标";
+        }
+        return validateTarget("effect", parts[2]);
+    }
+
+    /**
+     * 目标合法性：必须是本模组假人，且不能是选择器。
+     */
+    @Nullable
+    private static String validateTarget(@NotNull String root, @NotNull String target) {
+        if (target.startsWith("@")) {
+            return "/" + root + " 的目标不能是选择器（收到: " + target
+                    + "）—— 请写明具体的 " + com.kongbai.aiagent.machine.FakePlayerNaming.prefix()
+                    + " 假人名";
+        }
+        if (!com.kongbai.aiagent.machine.FakePlayerNaming.isOurs(target)) {
+            return "/" + root + " 的目标必须是 "
+                    + com.kongbai.aiagent.machine.FakePlayerNaming.prefix()
+                    + " 前缀的假人（收到: " + target + "）—— 不允许作用于真实玩家";
+        }
+        return null;
+    }
+
+    /**
      * 命令根放行后的语义校验。
      *
      * <p><b>为什么不能只看命令根</b>：白名单是按「命令根」匹配的，
@@ -196,7 +301,7 @@ public final class PermissionGuard {
             default -> {
                 Set<String> allowedSubs = READ_ONLY_SUBCOMMANDS.get(root);
                 if (allowedSubs == null) {
-                    return null; // 无额外约束
+                    return checkTargeted(root, command);
                 }
                 return checkReadOnlySubcommand(root, command, allowedSubs);
             }
@@ -326,6 +431,18 @@ public final class PermissionGuard {
      */
     public static boolean isPermanentlyForbidden(@Nullable String root) {
         return root != null && FORBIDDEN_ROOTS.contains(root.toLowerCase(Locale.ROOT));
+    }
+
+    /**
+     * 该命令根是否在<b>内置</b>白名单中（不含服主 {@code policy allow} 的条目）。
+     *
+     * <p>用于 {@code /carpet ai policy allow} 时提示服主：
+     * 内置清单之外的命令多半来自其他模组（TIS Carpet Addition 的
+     * {@code /manipulate}、{@code /removeentity}，GCA、Carpet-Org-Addition 等），
+     * 本模组无法预判它们的破坏力，放行等于把那个模组的权限体系也交给了 AI。
+     */
+    public static boolean isBuiltinAllowed(@Nullable String root) {
+        return root != null && ALLOWED_ROOTS.contains(root.toLowerCase(Locale.ROOT));
     }
 
     /**

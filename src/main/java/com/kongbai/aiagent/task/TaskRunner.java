@@ -438,6 +438,10 @@ public final class TaskRunner {
                     pendingProtection = true;
                     return;
                 }
+                // 注意：这里刻意【不做】「每刻 tp 回出生点」来抗幻翼击退 ——
+                // 那会把假人钉死在出生点，直接摧毁回放轨迹。
+                // 幻翼防护改为从源头关闭生成，见 PermissionPolicy#phantomGuard
+                // 与 /carpet ai bot phantom。
             }
             long elapsed = Math.max(0, currentTick - startTick);
             List<RecordedAction> actions = task.actions();
