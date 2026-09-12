@@ -12,11 +12,18 @@ Minecraft **26.2** + Fabric + Carpet 的附属模组。让 AI 通过 Carpet 命�
 | 组件 | 版本 | 说明 |
 |---|---|---|
 | Minecraft | **26.2** | Chaos Cubed，2026-06-16 发布 |
-| Java | 25 | MC 26.1+ 强制要求 |
-| Fabric Loader | 0.19.5 | fabricmc.net/develop 推荐值 |
-| Fabric Loom | 1.17-SNAPSHOT | 同上 |
-| Fabric API | 0.160.0+26.2 | 同上 |
-| Carpet | 26.2+v260621 | masa.dy.fi/maven |
+| Java | 25 | MC 26.1+ 强制要求，不可降级 |
+| Fabric Loader | **0.19.3**（下限）/ 0.19.5（推荐） | 需与 gradle.properties 的 `loader_version` 一致 |
+| Fabric Loom | 1.17-SNAPSHOT | 26.1+ 插件 id 为 `net.fabricmc.fabric-loom` |
+| Fabric API | 0.160.0+26.2 | 本模组**未直接调用**，仅编译期对齐，运行时非必需 |
+| Carpet | 26.2 | Modrinth Maven 坐标 `maven.modrinth:carpet:26.2` |
+
+> ⚠️ **版本基线唯一真相是 `gradle.properties`**。README 只是说明，一旦两处冲突以 gradle.properties 为准。
+>
+> ⚠️ **`fabric.mod.json` 的 `minecraft` 不要写 `~26.2`** —— `~` 在 Fabric semver 中等价于 `>=26.2.0 <26.3.0`，
+> 只要版本字符串带 hotfix 后缀或格式与预期不同，就会误判成"旧版本"而拒绝加载。已改为 `>=26.2`。
+
+**版本号不要自行改动** —— 26.2 是 2026 年的编号体系（YY.D 格式），不是 1.21.x 的延续。
 
 **版本号不要自行改动** —— 26.2 是 2026 年的编号体系（YY.D 格式），不是 1.21.x 的延续。
 
