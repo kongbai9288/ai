@@ -119,15 +119,22 @@ public final class RecorderManager {
         return get(ownerUuid) != null;
     }
 
-    /** 每刻对所有进行中的会话采样。由 tick 钩子调用。 */
+    /**
+     * 每刻对所有进行中的会话采样。
+     *
+     * <p><b>本方法已废弃且为空实现</b>：采样需要玩家坐标，而坐标只能从
+     * {@code ServerPlayer} 读取。本类刻意不依赖 Minecraft 类（便于脱离游戏环境测试），
+     * 因此采样逻辑实际由 {@code AiAgentMod.AiAgentExtension#sampleRecorders} 承担 ——
+     * 它遍历 {@link #activeRecordings()}、取出玩家、再调用
+     * {@code TaskRecorder#sample}。
+     *
+     * <p>保留此方法仅为兼容旧调用点；请不要在这里加逻辑，也不要依赖它做任何事。
+     *
+     * @deprecated 采样在 {@code AiAgentMod} 的 tick 钩子中完成，此方法不做任何事。
+     */
+    @Deprecated
     public void tick(long currentTick) {
-        for (TaskRecorder recorder : sessions.values()) {
-            if (recorder == null) {
-                continue;
-            }
-            // 采样数据由调用方通过 sampleFor 提供；这里只负责驱动"是否需要采样"
-            // 实际坐标获取放在 AiAgentMod 的 tick 钩子中，避免本类依赖 Minecraft 类
-        }
+        // 有意留空，详见方法注释
     }
 
     /**

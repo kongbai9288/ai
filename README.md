@@ -64,7 +64,39 @@ Minecraft **26.2** + Fabric + Carpet 的附属模组。让 AI 通过 Carpet 命�
 机器开关同理：低权限玩家 `machine add` 引用高权限者录制的任务即可借权。
 
 **修复**：实际生效等级改为 `min(录制者, 执行者)` —— 执行者无法借此抬高自己的权限。
-（`TaskRunner.start` 增加了 `executorPermLevel` 参数，所有命令入口均已显式传入。）
+（`TaskRunner.start` 改为接收执行者的 `CommandSourceStack`，从中断出权限与名字，
+所有命令入口均已传入。）
+
+> 顺带修掉一个同源的功能 bug：不指定假人时，移动/视角命令拼的是 `tp @s ...`。
+> 但投递器用的是 `server.createCommandSourceStack()`（**没有实体**的服务器级 source），
+> `@s` 永远无法解析 —— 「不填假人就驱动执行者自己」这条路其实从未真正工作过。
+> 现在改为直接写执行者的名字。
+
+### 永久黑名单曾被一条白名单命令完全绕过
+
+`PermissionGuard` 只校验**命令根**，而 `/execute` 能把任意命令当参数吞掉：
+
+```
+op attacker                -> root=op      -> 黑名单拦截 ✅
+execute run op attacker    -> root=execute -> 白名单放行 ❌
+```
+
+`execute` 当时被列在「只读探测」组里（和 `list`/`data`/`scoreboard`/`tag` 一起）。
+只要它在白名单里，**整张永久黑名单形同虚设** ——
+`execute run fill ...`、`execute run stop`、`execute run function ...` 全部放行，
+嵌套（`execute run execute run op`）自然也拦不住。
+
+**修复**：`check()` 在命令根放行后追加语义校验 ——
+对 `/execute` 按 `run` 分段递归校验内部命令；对 `data`/`scoreboard` 收窄到只读子命令。
+
+> 业界做法参考：fabric-command-hider 等权限模组是**遍历整棵 Brigadier 命令树**逐节点校验，
+> 而不是只看根。本类校验发生在派发前、没有命令树上下文，因此用递归分段近似达到同样效果。
+> 副作用是参数里恰好出现单词 `run` 时可能误拦（刻意选择「误拦」而非「漏拦」）。
+
+### 命令投递器现在是最后一道兜底
+
+闸门原先只在各调用点校验，新调用点一旦漏校验，不可信命令就直达派发。
+现在 `AiAgentMod.createCommandSink` 内部也会过一次 `PermissionGuard`，任何路径都绕不开。
 
 ### HTTP 客户端
 

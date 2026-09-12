@@ -3,6 +3,7 @@ package com.kongbai.aiagent.task;
 import com.kongbai.aiagent.machine.FakePlayerNaming;
 import com.kongbai.aiagent.util.Auditor;
 import com.kongbai.aiagent.util.PermissionGuard;
+import net.minecraft.commands.CommandSourceStack;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -112,6 +113,29 @@ public final class TaskRunner {
     @Nullable
     public Long start(@Nullable RecordedTask task, @Nullable String fakeName,
                       long startTick, boolean force, int executorPermLevel) {
+        return start(task, fakeName, startTick, force, executorPermLevel, null);
+    }
+
+    /**
+     * 启动一个回放（推荐入口：显式传入执行者的命令源）。
+     *
+     * @param source 执行者的命令源；为 {@code null} 时退化为「与录制者同级、不驱动具体玩家」
+     */
+    @Nullable
+    public Long start(@Nullable RecordedTask task, @Nullable String fakeName,
+                      long startTick, boolean force, @Nullable CommandSourceStack source) {
+        if (source == null) {
+            return start(task, fakeName, startTick, force, Integer.MAX_VALUE, null);
+        }
+        String executorName = resolveExecutorName(source);
+        return start(task, fakeName, startTick, force,
+                PermissionGuard.levelOf(source), executorName);
+    }
+
+    @Nullable
+    private Long start(@Nullable RecordedTask task, @Nullable String fakeName,
+                       long startTick, boolean force, int executorPermLevel,
+                       @Nullable String executorName) {
         if (task == null) {
             return null;
         }
@@ -125,8 +149,31 @@ public final class TaskRunner {
         int effective = Math.min(task.permLevel(), executor);
         long id = nextId.getAndIncrement();
         playbacks.put(id, new Playback(id, task, normalizeFakeName(fakeName),
-                startTick, force, effective));
+                startTick, force, effective, executorName));
         return id;
+    }
+
+    /**
+     * 取执行者名字，用于「不指定假人时驱动执行者自己」的移动/视角命令。
+     *
+     * <p><b>为什么不能继续用 {@code @s}</b>：命令投递器用的是
+     * {@code server.createCommandSourceStack()}，那是个<b>没有实体</b>的服务器级 source。
+     * {@code @s} 需要 source 上有实体才能解析，因此
+     * {@code tp @s x y z} 在任何情况下都会失败 ——
+     * 「不填假人就驱动执行者自己」这条路其实从未真正工作过。
+     * 改为直接写执行者的名字，语义正确且可回退。
+     */
+    @Nullable
+    private static String resolveExecutorName(@NotNull CommandSourceStack source) {
+        try {
+            if (source.getPlayer() != null) {
+                return source.getPlayer().getGameProfile().name();
+            }
+            String text = source.getTextName();
+            return text == null || text.isBlank() ? null : text;
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     /**
@@ -243,18 +290,26 @@ public final class TaskRunner {
          * 见 {@code start(...)} 的说明。
          */
         private final int effectivePermLevel;
+        /**
+         * 执行者名字。未指定假人时用它做移动/视角的目标；
+         * 为 {@code null} 时移动/视角命令无法定位目标，只能跳过。
+         */
+        @Nullable
+        private final String executorName;
         private int cursor;
         /** 本回放发送过"检测中"提示，避免每个动作都刷屏。 */
         private boolean probeNotified;
 
         Playback(long id, @NotNull RecordedTask task, @Nullable String fakeName,
-                 long startTick, boolean force, int effectivePermLevel) {
+                 long startTick, boolean force, int effectivePermLevel,
+                 @Nullable String executorName) {
             this.id = id;
             this.task = task;
             this.fakeName = fakeName;
             this.startTick = startTick;
             this.force = force;
             this.effectivePermLevel = Math.max(0, Math.min(4, effectivePermLevel));
+            this.executorName = executorName;
         }
 
         boolean isDone() {
@@ -293,16 +348,25 @@ public final class TaskRunner {
                              @Nullable BlockProbe probe, @NotNull List<String> messages) {
             switch (action.type()) {
                 case MOVE -> {
+                    String target = fakeName == null ? executorName : fakeName;
+                    if (target == null) {
+                        break; // 既无假人也无执行者名字，无法定位目标
+                    }
                     String cmd = fakeName == null
-                            ? String.format(Locale.ROOT, "tp %s %.3f %.3f %.3f", "@s",
+                            ? String.format(Locale.ROOT, "tp %s %.3f %.3f %.3f", target,
                             action.x(), action.y(), action.z())
                             : String.format(Locale.ROOT, "player %s tp %.3f %.3f %.3f",
                             fakeName, action.x(), action.y(), action.z());
                     dispatch(currentTick, cmd, "移动", sink, messages);
                 }
                 case LOOK -> {
+                    String target = fakeName == null ? executorName : fakeName;
+                    if (target == null) {
+                        break;
+                    }
                     String cmd = fakeName == null
-                            ? String.format(Locale.ROOT, "tp %s %.1f %.1f", "@s", action.yaw(), action.pitch())
+                            ? String.format(Locale.ROOT, "tp %s %.1f %.1f", target,
+                            action.yaw(), action.pitch())
                             : String.format(Locale.ROOT, "player %s look %.1f %.1f",
                             fakeName, action.yaw(), action.pitch());
                     dispatch(currentTick, cmd, "视角", sink, messages);

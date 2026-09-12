@@ -80,6 +80,46 @@ public class AiAgentMod implements ModInitializer {
         LOGGER.info("[假人智能] 初始化完成 (MC 26.2 / Carpet 扩展模式)");
     }
 
+    /**
+     * 构造一个命令投递器（供命令层使用）。
+     *
+     * <p>与 {@code AiAgentExtension.createSink} 是同一套逻辑：
+     * 先过 {@link PermissionGuard}、再降权、最后派发并记审计。
+     *
+     * <p><b>为什么投递器自己也要过一次闸门</b>：闸门原本只在各调用点校验
+     * （{@code TaskRunner} / {@code Scheduler} / {@code AgentService}），
+     * 只要有一个新调用点忘了校验，不可信命令就会直达派发。
+     * 放在投递器里是最后一道兜底，任何调用路径都绕不开。
+     *
+     * @param source 审计用的来源标记
+     */
+    @NotNull
+    public static CommandSink createCommandSink(@NotNull MinecraftServer server,
+                                                @NotNull Auditor.Source source) {
+        return (command, permLevel) -> {
+            long tick = server.getTickCount();
+            String reason = PermissionGuard.check(command);
+            if (reason != null) {
+                Auditor.getInstance().record(tick, null, permLevel, command,
+                        Auditor.Result.BLOCKED, source, reason);
+                return false;
+            }
+            try {
+                CommandSourceStack stack =
+                        PermissionGuard.clamp(server.createCommandSourceStack(), permLevel);
+                server.getCommands().performPrefixedCommand(stack, command);
+                Auditor.getInstance().record(tick, null, permLevel, command,
+                        Auditor.Result.EXECUTED, source, null);
+                return true;
+            } catch (Throwable t) {
+                LOGGER.warn("[假人智能] 命令执行失败 /{} : {}", command, t.getMessage());
+                Auditor.getInstance().record(tick, null, permLevel, command,
+                        Auditor.Result.FAILED, source, t.getMessage());
+                return false;
+            }
+        };
+    }
+
     /** 向 Carpet 注册扩展。失败只记录日志，不阻断游戏启动。 */
     public void loadExtension() {
         try {

@@ -171,6 +171,35 @@ public final class Scheduler {
         tasks.clear();
     }
 
+    /**
+     * 停止全部并<b>执行各自的停止命令</b>。
+     *
+     * <p><b>为什么需要这个重载</b>：{@link #stopAll()} 只是清空内存表，
+     * 一条停止命令都不发。服务器关闭时这是对的（世界马上就没了），
+     * 但玩家执行 {@code /carpet ai sched stop} 时期望的是「假人真的停下来」——
+     * 用 {@code stopAll()} 会显示「已停止 N 个」，而假人还在原地继续挖矿。
+     *
+     * @param sink 命令投递器；为 {@code null} 时退化为 {@link #stopAll()}
+     * @return 被停止的任务数
+     */
+    public int stopAll(@Nullable CommandSink sink) {
+        int count = tasks.size();
+        if (count == 0) {
+            return 0;
+        }
+        if (sink == null) {
+            stopAll();
+            return count;
+        }
+        // 逐个 stop 而不是直接 clear —— 每个任务都要发出自己的停止命令，
+        // 否则 carpet 假人会一直保持 use/attack/move 的持续动作。
+        for (Long id : new java.util.ArrayList<>(tasks.keySet())) {
+            stop(id, sink);
+        }
+        tasks.clear(); // 兜底：个别任务 stop 失败也要清空
+        return count;
+    }
+
     /** 停止某玩家发起的全部长期任务。 */
     public int stopByOwner(@Nullable UUID uuid, @Nullable CommandSink sink) {
         if (uuid == null) {

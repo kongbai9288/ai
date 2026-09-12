@@ -1,5 +1,7 @@
 package com.kongbai.aiagent.command;
 
+import com.kongbai.aiagent.AiAgentMod;
+import com.kongbai.aiagent.task.CommandSink;
 import com.kongbai.aiagent.config.AiProfile;
 import com.kongbai.aiagent.config.ProfileManager;
 import com.kongbai.aiagent.machine.FakePlayerNaming;
@@ -706,8 +708,7 @@ public final class AiCommand {
             return 0;
         }
         long tick = currentTick(source);
-        Long id = TaskRunner.getInstance().start(task, fakeName, tick, force,
-                PermissionGuard.levelOf(source));
+        Long id = TaskRunner.getInstance().start(task, fakeName, tick, force, source);
         if (id == null) {
             sendError(source, "无法启动回放：可能任务为空，或回放数量已达上限 "
                     + TaskRunner.MAX_CONCURRENT);
@@ -745,7 +746,7 @@ public final class AiCommand {
             if (task == null || task.isEmpty()) {
                 continue;
             }
-            if (runner.start(task, fakeName, tick, force, PermissionGuard.levelOf(source)) != null) {
+            if (runner.start(task, fakeName, tick, force, source) != null) {
                 started++;
             } else {
                 failed++;
@@ -951,8 +952,7 @@ public final class AiCommand {
             sendError(source, "关联的任务已不存在: " + taskName);
             return 0;
         }
-        Long id = TaskRunner.getInstance().start(task, null, currentTick(source), false,
-                PermissionGuard.levelOf(source));
+        Long id = TaskRunner.getInstance().start(task, null, currentTick(source), false, source);
         if (id == null) {
             sendError(source, "启动失败：任务为空或回放已达上限");
             return 0;
@@ -1045,7 +1045,7 @@ public final class AiCommand {
             if (task == null || task.isEmpty()) {
                 continue;
             }
-            if (runner.start(task, null, tick, false, PermissionGuard.levelOf(source)) != null) {
+            if (runner.start(task, null, tick, false, source) != null) {
                 started++;
                 if (machine.state() == MachineState.UNKNOWN) {
                     unknownNames.add(machine.name());
@@ -1089,7 +1089,7 @@ public final class AiCommand {
                 if (task == null || task.isEmpty()) {
                     continue;
                 }
-                if (runner.start(task, null, tick, false, PermissionGuard.levelOf(source)) != null) {
+                if (runner.start(task, null, tick, false, source) != null) {
                     machines++;
                     registry.put(machine.withState(MachineState.OFF));
                 }
@@ -1128,7 +1128,7 @@ public final class AiCommand {
             if (task == null || task.isEmpty()) {
                 continue;
             }
-            if (runner.start(task, null, tick, false, PermissionGuard.levelOf(source)) != null) {
+            if (runner.start(task, null, tick, false, source) != null) {
                 started++;
                 registry.put(machine.withState(MachineState.ON));
             }
@@ -1246,8 +1246,16 @@ public final class AiCommand {
             send(source, "§7当前没有进行中的长期任务");
             return 1;
         }
-        scheduler.stopAll();
-        send(source, "§a已停止 " + count + " 个长期任务");
+        // 必须用带 sink 的重载：无参 stopAll() 只清内存表、不发停止命令，
+        // 假人会原地继续动作，与「已停止 N 个」的提示不符。
+        MinecraftServer server = source.getServer();
+        CommandSink sink = server == null ? null
+                : AiAgentMod.createCommandSink(server, Auditor.Source.PLAYER);
+        int stopped = scheduler.stopAll(sink);
+        send(source, "§a已停止 " + stopped + " 个长期任务（已发出停止命令）");
+        if (sink == null) {
+            send(source, "§6服务器上下文不可用，仅清除了任务记录，假人可能仍在动作");
+        }
         return 1;
     }
 

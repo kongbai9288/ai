@@ -9,6 +9,7 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -60,14 +61,58 @@ public final class PermissionGuard {
     private static final Set<String> ALLOWED_ROOTS = Set.of(
             // 假人操作（核心能力）
             "player",
-            // 只读探测：让 AI 能"看见"世界，但不能改
-            "list", "data", "execute", "scoreboard", "tag",
+            // 只读探测：仅放行只读子命令（见 READ_ONLY_SUBCOMMANDS）
+            "list", "data", "scoreboard", "tag",
+            // 通用执行器：可以包裹任意命令，必须递归校验内部命令（见 checkExecuteNested）
+            "execute",
             // 受限的实体/物品操作（仍需通过降权 source 校验权限等级）
             "summon", "give", "clear", "effect", "tp", "teleport",
             "gamemode", "weather", "time", "gamerule", "setworldspawn",
-            // Carpet 规则：仅允许查询，不允许修改（见 isCarpetRuleMutation）
+            // Carpet：仅允许查询规则 + 本模组的机器控制（见 checkCarpet）
             "carpet"
     );
+
+    /**
+     * 「只读探测」类命令允许的子命令。
+     *
+     * <p><b>为什么需要</b>：{@code data} / {@code scoreboard} / {@code tag} 曾被注释为
+     * 「只读探测」，但它们都带写子命令 —— {@code /data modify} 能改任意 NBT，
+     * {@code /scoreboard objectives add}、{@code /tag <目标> add} 都是写操作。
+     * 只按命令根放行等于把「只读」的承诺让给了 AI 自己遵守。
+     *
+     * <p>key = 命令根；value = 该命令第 2 段允许的只读子命令。
+     * 列表中未出现的根（如 {@code list}）本身即只读，无需约束。
+     */
+    private static final Map<String, Set<String>> READ_ONLY_SUBCOMMANDS = Map.of(
+            "data", Set.of("get"),
+            "scoreboard", Set.of("objectives", "players")
+    );
+
+    /**
+     * {@code scoreboard} 第 3 段允许的只读子命令。
+     *
+     * <p>{@code objectives add/remove/modify}、{@code players set/add/reset/operation}
+     * 等都是写操作，因此这里只放行 {@code list} 与 {@code get}。
+     */
+    private static final Set<String> SCOREBOARD_READ_ONLY = Set.of("list", "get");
+
+    /**
+     * {@code /carpet ai} 下允许 AI 调用的子命令。
+     *
+     * <p><b>为什么必须显式收窄</b>：{@code AiPrompts} 教 AI 用
+     * {@code /carpet ai machine on|off|offall|stopall|setstate} 控制机器，
+     * 这是本模组的核心能力之一。但整条 {@code carpet ai} 树里还有
+     * {@code api set <地址> <模型> <密钥>} —— 放行它等于让 AI 把 API 指向
+     * 攻击者的服务器并接管后续所有对话（这正是「自指阻断」要防的事）。
+     *
+     * <p>因此只放行机器控制与只读查询，其余（api / rec / run / ask / bot /
+     * sched / end / audit / perm）一律拒绝。
+     */
+    private static final Set<String> CARPET_AI_ALLOWED = Set.of("machine");
+
+    /** {@code /carpet ai machine} 下允许的子命令。 */
+    private static final Set<String> CARPET_AI_MACHINE_ALLOWED =
+            Set.of("on", "off", "offall", "stopall", "setstate", "list");
 
     /** 单条命令最大长度，防止超长输入压垮解析与日志。 */
     public static final int MAX_COMMAND_LENGTH = 512;
@@ -108,7 +153,124 @@ public final class PermissionGuard {
         if (!ALLOWED_ROOTS.contains(root)) {
             return "命令 /" + root + " 不在允许清单内";
         }
-        if (root.equals("carpet") && isCarpetRuleMutation(trimmed)) {
+        // 命令根放行还不够 —— 还要看这条命令具体想干什么
+        return checkSemantics(root, trimmed);
+    }
+
+    /**
+     * 命令根放行后的语义校验。
+     *
+     * <p><b>为什么不能只看命令根</b>：白名单是按「命令根」匹配的，
+     * 但 Minecraft 里有若干「通用执行器」命令，它们能把任意命令当参数吃掉。
+     * 最典型的就是 {@code /execute}：
+     * <pre>
+     *   op attacker              -> root=op        -> 黑名单拦截 ✅
+     *   execute run op attacker  -> root=execute   -> 白名单放行 ❌
+     * </pre>
+     * 只要 {@code execute} 在白名单里，整张永久黑名单就形同虚设。
+     * 因此必须递归校验被包裹的内部命令。
+     *
+     * <p>参考业界做法：fabric-command-hider 等权限模组是<b>遍历整棵 Brigadier
+     * 命令树</b>逐节点校验，而不是只看根。本类没有命令树上下文（校验发生在
+     * 派发之前），因此改用「按 {@code run} 分段递归」近似达到同样效果。
+     */
+    @Nullable
+    private static String checkSemantics(@NotNull String root, @NotNull String command) {
+        switch (root) {
+            case "execute" -> {
+                return checkExecuteNested(command);
+            }
+            case "carpet" -> {
+                return checkCarpet(command);
+            }
+            default -> {
+                Set<String> allowedSubs = READ_ONLY_SUBCOMMANDS.get(root);
+                if (allowedSubs == null) {
+                    return null; // 无额外约束
+                }
+                return checkReadOnlySubcommand(root, command, allowedSubs);
+            }
+        }
+    }
+
+    /**
+     * 递归校验 {@code /execute} 包裹的内部命令。
+     *
+     * <p>对每个单独成词的 {@code run} 之后的内容，当作一条独立命令递归校验。
+     * 嵌套（{@code execute run execute run op}）也会被逐层拆开。
+     *
+     * <p><b>宁可错杀</b>：把参数里恰好出现单词 {@code run} 的情况也当成子命令，
+     * 可能误拦合法命令（例如 {@code execute if data entity @s {CustomName:"run"}}）。
+     * 这里刻意选择「误拦」而非「漏拦」—— 安全方向优先。
+     */
+    @Nullable
+    private static String checkExecuteNested(@NotNull String command) {
+        String[] parts = command.trim().split("\\s+");
+        for (int i = 1; i < parts.length; i++) {
+            if (!parts[i].equals("run")) {
+                continue;
+            }
+            if (i + 1 >= parts.length) {
+                continue; // 语法不完整的 execute，交给 Brigadier 去报错
+            }
+            String nested = String.join(" ", java.util.Arrays.copyOfRange(parts, i + 1, parts.length));
+            String reason = check(nested);
+            if (reason != null) {
+                return "/execute 包裹的命令 /" + rootOf(nested) + " 不被允许：" + reason;
+            }
+        }
+        return null;
+    }
+
+    /** 只读类命令：第 2 段必须落在只读子命令集合内。 */
+    @Nullable
+    private static String checkReadOnlySubcommand(@NotNull String root, @NotNull String command,
+                                                  @NotNull Set<String> allowedSubs) {
+        String[] parts = command.trim().split("\\s+");
+        // 去掉可能的前导 "/" —— rootOf 会处理，这里 parts[0] 可能是 "/data"
+        String sub = parts.length >= 2 ? parts[1] : "";
+        if (!allowedSubs.contains(sub.toLowerCase(Locale.ROOT))) {
+            return "/" + root + " 仅允许只读子命令 " + allowedSubs + "，收到: " + sub;
+        }
+        if (root.equals("scoreboard") && parts.length >= 3) {
+            String third = parts[2].toLowerCase(Locale.ROOT);
+            if (!SCOREBOARD_READ_ONLY.contains(third)) {
+                return "/scoreboard " + sub + " 仅允许 " + SCOREBOARD_READ_ONLY + "，收到: " + third;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 校验 {@code /carpet ...}。
+     *
+     * <p>两条规则：
+     * <ol>
+     *   <li>普通 Carpet 规则 —— 只允许查询，不允许修改（沿用 {@link #isCarpetRuleMutation}）</li>
+     *   <li>{@code /carpet ai ...} —— 只放行机器控制，其余一律拒绝</li>
+     * </ol>
+     */
+    @Nullable
+    private static String checkCarpet(@NotNull String command) {
+        String[] parts = command.trim().split("\\s+");
+        if (parts.length >= 2 && parts[1].equalsIgnoreCase("ai")) {
+            // /carpet ai ... —— 本模组自己的命令树，收窄到机器控制
+            if (parts.length < 4) {
+                return "/carpet ai 参数不完整，且 AI 仅可调用 machine 子命令";
+            }
+            String sub = parts[2].toLowerCase(Locale.ROOT);
+            if (!CARPET_AI_ALLOWED.contains(sub)) {
+                return "AI 不允许调用 /carpet ai " + sub
+                        + "（仅允许 machine，以防 AI 自行修改 API 配置形成提权闭环）";
+            }
+            String action = parts[3].toLowerCase(Locale.ROOT);
+            if (!CARPET_AI_MACHINE_ALLOWED.contains(action)) {
+                return "AI 不允许调用 /carpet ai machine " + action
+                        + "（允许: " + CARPET_AI_MACHINE_ALLOWED + "）";
+            }
+            return null;
+        }
+        if (isCarpetRuleMutation(command)) {
             return "AI 不允许修改 Carpet 规则（仅可查询）";
         }
         return null;
