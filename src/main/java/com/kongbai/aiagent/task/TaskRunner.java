@@ -78,7 +78,7 @@ public final class TaskRunner {
      */
     @Nullable
     public Long start(@Nullable RecordedTask task, @Nullable String fakeName, long startTick) {
-        return start(task, fakeName, startTick, false);
+        return start(task, fakeName, startTick, false, Integer.MAX_VALUE);
     }
 
     /**
@@ -90,6 +90,28 @@ public final class TaskRunner {
     @Nullable
     public Long start(@Nullable RecordedTask task, @Nullable String fakeName,
                       long startTick, boolean force) {
+        // 未指定执行者权限：退化为「与录制者同级」（旧行为），调用方应尽量用下面的重载
+        return start(task, fakeName, startTick, force, Integer.MAX_VALUE);
+    }
+
+    /**
+     * 启动一个回放（推荐：显式传入执行者权限等级）。
+     *
+     * <p><b>为什么需要执行者权限</b>：回放执行的命令原本一律用
+     * {@code task.permLevel()}（<b>录制者</b>的权限）。这在单人场景没问题，
+     * 但多人服务器上是直接的提权路径 ——
+     * 只要 OP 录过某个任务，任何普通玩家 {@code /carpet ai run <那个任务>}
+     * 就能以等级 4 执行其中的命令（{@code give} / {@code tp} / {@code gamemode} 等
+     * 都在白名单内）。机器开关同理：低权限玩家定义机器引用高权限者的任务即可借权。
+     *
+     * <p>因此实际生效等级取 {@code min(录制者, 执行者)}：
+     * 既保留「任务本身需要一定权限」的语义，又保证执行者无法借此抬高自己的权限。
+     *
+     * @param executorPermLevel 执行者的权限等级（0-4）；传负数或超大值会被夹到合法区间
+     */
+    @Nullable
+    public Long start(@Nullable RecordedTask task, @Nullable String fakeName,
+                      long startTick, boolean force, int executorPermLevel) {
         if (task == null) {
             return null;
         }
@@ -99,8 +121,11 @@ public final class TaskRunner {
         if (playbacks.size() >= MAX_CONCURRENT) {
             return null;
         }
+        int executor = Math.max(0, Math.min(4, executorPermLevel));
+        int effective = Math.min(task.permLevel(), executor);
         long id = nextId.getAndIncrement();
-        playbacks.put(id, new Playback(id, task, normalizeFakeName(fakeName), startTick, force));
+        playbacks.put(id, new Playback(id, task, normalizeFakeName(fakeName),
+                startTick, force, effective));
         return id;
     }
 
@@ -211,17 +236,25 @@ public final class TaskRunner {
         private final long startTick;
         /** 是否跳过状态检测强制执行。 */
         private final boolean force;
+        /**
+         * 实际生效的权限等级 = min(录制者, 执行者)。
+         *
+         * <p>直接用 {@code task.permLevel()} 会让任何执行者都能借录制者的权限，
+         * 见 {@code start(...)} 的说明。
+         */
+        private final int effectivePermLevel;
         private int cursor;
         /** 本回放发送过"检测中"提示，避免每个动作都刷屏。 */
         private boolean probeNotified;
 
         Playback(long id, @NotNull RecordedTask task, @Nullable String fakeName,
-                 long startTick, boolean force) {
+                 long startTick, boolean force, int effectivePermLevel) {
             this.id = id;
             this.task = task;
             this.fakeName = fakeName;
             this.startTick = startTick;
             this.force = force;
+            this.effectivePermLevel = Math.max(0, Math.min(4, effectivePermLevel));
         }
 
         boolean isDone() {
@@ -284,7 +317,7 @@ public final class TaskRunner {
                     if (reason != null) {
                         messages.add("§c已拦截任务「" + task.name() + "」中的命令 /"
                                 + PermissionGuard.rootOf(raw) + "：" + reason);
-                        Auditor.getInstance().record(currentTick, null, task.permLevel(), raw,
+                        Auditor.getInstance().record(currentTick, null, effectivePermLevel, raw,
                                 Auditor.Result.BLOCKED, Auditor.Source.PLAYBACK, reason);
                         return;
                     }
@@ -402,11 +435,11 @@ public final class TaskRunner {
             String reason = PermissionGuard.check(command);
             if (reason != null) {
                 messages.add("§c" + label + "被拦截：" + reason);
-                Auditor.getInstance().record(currentTick, null, task.permLevel(), command,
+                Auditor.getInstance().record(currentTick, null, effectivePermLevel, command,
                         Auditor.Result.BLOCKED, Auditor.Source.PLAYBACK, reason);
                 return;
             }
-            boolean ok = sink.execute(command, task.permLevel());
+            boolean ok = sink.execute(command, effectivePermLevel);
             if (!ok) {
                 messages.add("§c" + label + "执行失败: /" + command);
             }

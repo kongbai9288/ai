@@ -5,6 +5,7 @@ import com.google.gson.JsonObject;
 import com.kongbai.aiagent.config.AiProfile;
 import com.kongbai.aiagent.util.JsonUtil;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -85,29 +86,94 @@ public final class OpenAiProvider implements AiProvider {
         }
 
         String body = buildRequestBody(profile, input);
-        HttpRequest request;
+        URI uri;
         try {
-            request = HttpRequest.newBuilder()
-                    .uri(URI.create(profile.chatEndpoint()))
-                    .timeout(Duration.ofMillis(profile.timeoutMs()))
-                    .header("Content-Type", "application/json")
-                    .header("Accept", "application/json")
-                    // 有密钥才带 Authorization：本地 Ollama 等不需要
-                    .header("Authorization", "Bearer " + profile.apiKey())
-                    .POST(HttpRequest.BodyPublishers.ofString(body))
-                    .build();
+            uri = URI.create(profile.chatEndpoint());
         } catch (IllegalArgumentException e) {
             // URI.create 对非法地址会抛 IllegalArgumentException
             return CompletableFuture.failedFuture(new AiException("API 地址非法: " + e.getMessage()));
         }
+        String schemeError = checkScheme(uri);
+        if (schemeError != null) {
+            return CompletableFuture.failedFuture(new AiException(schemeError));
+        }
 
-        return http.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+        HttpRequest.Builder builder = HttpRequest.newBuilder()
+                .uri(uri)
+                .timeout(Duration.ofMillis(profile.timeoutMs()))
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body));
+        // 有密钥才带 Authorization：本地 Ollama 等不需要，空 Bearer 会被部分服务端拒
+        if (!profile.apiKey().isEmpty()) {
+            builder.header("Authorization", "Bearer " + profile.apiKey());
+        }
+        HttpRequest request;
+        try {
+            request = builder.build();
+        } catch (IllegalArgumentException e) {
+            return CompletableFuture.failedFuture(new AiException("API 地址非法: " + e.getMessage()));
+        }
+
+        // 关键：用 ofInputStream 自己限量读取，而不是 ofString()。
+        // ofString() 会把整个响应无上限地读入内存，之后再判断大小已经晚了 ——
+        // 一个异常/恶意服务返回几 GB 数据就能先吃满堆。
+        return http.sendAsync(request, HttpResponse.BodyHandlers.ofInputStream())
                 .orTimeout(profile.timeoutMs() + 5_000L, TimeUnit.MILLISECONDS)
                 .thenApply(response -> parseResponse(response))
                 // 把受检异常包装成 AiException，统一失败语义
                 .exceptionally(throwable -> {
                     throw new java.util.concurrent.CompletionException(toAiException(throwable));
                 });
+    }
+
+    /**
+     * 只放行 http / https。
+     *
+     * <p><b>为什么需要</b>：地址完全由玩家在 {@code /carpet ai api set} 里自由填写，
+     * 属于不可信输入。虽然 JDK 的 HttpClient 不支持 {@code file:} / {@code jar:}，
+     * 但显式校验协议能挡住未来依赖变更带来的意外（也挡住 jar: 这类有已知绕过史的协议）。
+     *
+     * <p><b>不禁止内网地址</b>：这是有意的设计取舍 —— 大量玩家用局域网内的
+     * Ollama / vLLM（{@code 192.168.x.x}），一刀切禁内网会让本地部署完全不可用。
+     * 风险在 README 的「安全模型」章节中说明，由服主自行判断。
+     */
+    @Nullable
+    private static String checkScheme(@NotNull URI uri) {
+        String scheme = uri.getScheme();
+        if (scheme == null) {
+            return "API 地址缺少协议（需以 http:// 或 https:// 开头）";
+        }
+        String lower = scheme.toLowerCase(java.util.Locale.ROOT);
+        if (!lower.equals("http") && !lower.equals("https")) {
+            return "API 地址协议不允许: " + scheme + "（仅支持 http / https）";
+        }
+        return null;
+    }
+
+    /**
+     * 限量读取响应体，最多 {@value #MAX_RESPONSE_BYTES} 字节。
+     *
+     * <p>边读边计数，超过上限立即停止并抛异常 —— 这样内存峰值就是上限值，
+     * 而不是「先全部读进内存再判断」。
+     */
+    @NotNull
+    private static String readBodyLimited(@NotNull java.io.InputStream stream) throws IOException {
+        java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
+        byte[] chunk = new byte[8192];
+        long total = 0L;
+        try (stream) {
+            int read;
+            while ((read = stream.read(chunk)) != -1) {
+                total += read;
+                if (total > MAX_RESPONSE_BYTES) {
+                    throw new AiException("AI 响应过大（超过 " + (MAX_RESPONSE_BYTES / 1024 / 1024)
+                            + " MB），已丢弃");
+                }
+                buffer.write(chunk, 0, read);
+            }
+        }
+        return buffer.toString(java.nio.charset.StandardCharsets.UTF_8);
     }
 
     @NotNull
@@ -137,11 +203,15 @@ public final class OpenAiProvider implements AiProvider {
      * @throws AiException HTTP 非 2xx 或响应体结构不符预期
      */
     @NotNull
-    private static String parseResponse(@NotNull HttpResponse<String> response) {
+    private static String parseResponse(@NotNull HttpResponse<java.io.InputStream> response) {
         int status = response.statusCode();
-        String body = response.body();
-        if (body != null && body.length() > MAX_RESPONSE_BYTES) {
-            throw new AiException("AI 响应过大，已丢弃");
+        String body;
+        try {
+            body = readBodyLimited(response.body());
+        } catch (AiException e) {
+            throw e;
+        } catch (IOException e) {
+            throw new AiException("读取 AI 响应失败：" + e.getMessage());
         }
         if (status < 200 || status >= 300) {
             // 只透出状态码与精简的错误摘要，避免把密钥回显写进日志

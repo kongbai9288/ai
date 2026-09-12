@@ -195,9 +195,14 @@ public final class Scheduler {
         return !tasks.isEmpty();
     }
 
-    /** 展示用：进行中的长期任务描述。 */
+    /**
+     * 展示用：进行中的长期任务描述。
+     *
+     * @param currentTick 当前游戏刻，用于计算<b>真实剩余时间</b>。
+     *                    缺了它只能算出「总时长」，显示的倒计时会永远停在初始值不递减。
+     */
     @NotNull
-    public List<String> activeNames() {
+    public List<String> activeNames(long currentTick) {
         java.util.List<String> out = new java.util.ArrayList<>();
         for (ScheduledTask task : tasks.values()) {
             if (task == null) {
@@ -206,7 +211,7 @@ public final class Scheduler {
             StringBuilder builder = new StringBuilder();
             builder.append('#').append(task.id).append(' ').append(task.plan.describe());
             if (task.deadlineTick >= 0) {
-                long remainTicks = task.deadlineTick - task.startTick;
+                long remainTicks = Math.max(0, task.deadlineTick - currentTick);
                 builder.append(" §8| 剩余 ").append(remainTicks / 20).append("s");
             }
             out.add(builder.toString());

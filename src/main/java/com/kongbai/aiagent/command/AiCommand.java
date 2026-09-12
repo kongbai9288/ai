@@ -706,7 +706,8 @@ public final class AiCommand {
             return 0;
         }
         long tick = currentTick(source);
-        Long id = TaskRunner.getInstance().start(task, fakeName, tick, force);
+        Long id = TaskRunner.getInstance().start(task, fakeName, tick, force,
+                PermissionGuard.levelOf(source));
         if (id == null) {
             sendError(source, "无法启动回放：可能任务为空，或回放数量已达上限 "
                     + TaskRunner.MAX_CONCURRENT);
@@ -744,7 +745,7 @@ public final class AiCommand {
             if (task == null || task.isEmpty()) {
                 continue;
             }
-            if (runner.start(task, fakeName, tick, force) != null) {
+            if (runner.start(task, fakeName, tick, force, PermissionGuard.levelOf(source)) != null) {
                 started++;
             } else {
                 failed++;
@@ -950,7 +951,8 @@ public final class AiCommand {
             sendError(source, "关联的任务已不存在: " + taskName);
             return 0;
         }
-        Long id = TaskRunner.getInstance().start(task, null, currentTick(source), false);
+        Long id = TaskRunner.getInstance().start(task, null, currentTick(source), false,
+                PermissionGuard.levelOf(source));
         if (id == null) {
             sendError(source, "启动失败：任务为空或回放已达上限");
             return 0;
@@ -1043,7 +1045,7 @@ public final class AiCommand {
             if (task == null || task.isEmpty()) {
                 continue;
             }
-            if (runner.start(task, null, tick, false) != null) {
+            if (runner.start(task, null, tick, false, PermissionGuard.levelOf(source)) != null) {
                 started++;
                 if (machine.state() == MachineState.UNKNOWN) {
                     unknownNames.add(machine.name());
@@ -1087,7 +1089,7 @@ public final class AiCommand {
                 if (task == null || task.isEmpty()) {
                     continue;
                 }
-                if (runner.start(task, null, tick, false) != null) {
+                if (runner.start(task, null, tick, false, PermissionGuard.levelOf(source)) != null) {
                     machines++;
                     registry.put(machine.withState(MachineState.OFF));
                 }
@@ -1126,7 +1128,7 @@ public final class AiCommand {
             if (task == null || task.isEmpty()) {
                 continue;
             }
-            if (runner.start(task, null, tick, false) != null) {
+            if (runner.start(task, null, tick, false, PermissionGuard.levelOf(source)) != null) {
                 started++;
                 registry.put(machine.withState(MachineState.ON));
             }
@@ -1227,7 +1229,10 @@ public final class AiCommand {
             return 1;
         }
         send(source, "§6进行中的长期任务（共 " + scheduler.activeCount() + "）");
-        for (String line : scheduler.activeNames()) {
+        // 传当前刻才能算出真实剩余时间（否则显示的是总时长，不递减）
+        MinecraftServer server = source.getServer();
+        long tick = server == null ? 0L : server.getTickCount();
+        for (String line : scheduler.activeNames(tick)) {
             send(source, "§7- §f" + line);
         }
         send(source, "§7停止全部：§f/carpet ai sched stop");
